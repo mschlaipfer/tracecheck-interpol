@@ -2088,7 +2088,7 @@ check_prestine_chain (Clause * clause)
  * clauses, such they can be dumped afterwards.
  */
   static int
-resolve (Clause * clause)
+resolve (Clause ** clause)
 {
   int *p, idx, iterations, len, count, prev, i, lit;
   short pivlab;
@@ -2097,28 +2097,28 @@ resolve (Clause * clause)
   int *q, idx2;
 #endif
 
-  if (!clause->antecedents)
+  if (!(*clause)->antecedents)
     goto POST_PROCESS_RESOLVED_CHAIN;
 
   if (hyperrestrace)
-    fprintf (hyperrestrace, "%d *", clause->idx);
+    fprintf (hyperrestrace, "%d *", (*clause)->idx);
 
 #ifdef BOOLEFORCE_LOG
   if (verbose > 1)
-    LOG ("resolving antecedents of clause %d", clause->idx);
+    LOG ("resolving antecedents of clause %d", (*clause)->idx);
 #endif
 
   assert (!count_resolvent);
 
-  assert (clause->antecedents);
-  p = clause->antecedents;
+  assert ((*clause)->antecedents);
+  p = (*clause)->antecedents;
   if (hyperrestrace)
     fprintf (hyperrestrace, " %d", *p);
   idx = *p++;
 
   if (!idx)
     return check_error ("clause %d at line %d has no antecedents",
-        clause->idx, clause->lineno);
+        (*clause)->idx, (*clause)->lineno);
 
 #if 0
   if (!*p)
@@ -2127,6 +2127,7 @@ resolve (Clause * clause)
 #endif
 
   antecedent = idx2clause (idx);
+  printf("ant idx: %d\n", antecedent->idx);
   assert (antecedent);
   assert (antecedent->resolved);	/* check topological order */
 
@@ -2136,8 +2137,8 @@ resolve (Clause * clause)
    */
   add_to_resolvent_except (antecedent, 0);
 
-  len = length_ints (clause->antecedents);
-  count = clause->newidx + 2 - len;
+  len = length_ints ((*clause)->antecedents);
+  count = (*clause)->newidx + 2 - len;
   prev = antecedent->newidx;
 
 #ifdef BOOLEFORCE_LOG
@@ -2154,7 +2155,6 @@ resolve (Clause * clause)
   // TODO split after contiguous chain of equally colored pivots.
   while ((idx = *p++))
   {
-    printf("\niteration\n");
 #ifdef BOOLEFORCE_LOG
     if (verbose > 1)
       print_resolvent (iterations ? "next" : "initial");
@@ -2163,32 +2163,55 @@ resolve (Clause * clause)
     iterations++;
 
     antecedent = idx2clause (idx);
-    printf("idx: %d\n", idx);
     push_stack(idx);
     assert (antecedent);
     assert (antecedent->resolved);
 
-    if (!(lit = resolve_clause (antecedent, clause)))
+    if (!(lit = resolve_clause (antecedent, (*clause))))
       return 0;
 
     // Note: careful with lit/idx
+    
     if (pivlab != UNDEF && pivlab != literals[-lit].label)
     {
       printf("NEW SPLIT %d -> %d\n", pivlab, literals[-lit].label);
+      
       for (i = 0; i < count_resolvent; i++)
         printf ("%d ", resolvent[i]);
       printf("\n");
-      int *antecedents = copy_stack();
-      int *tmp = clause->antecedents;
-      int *res = copy_ints(resolvent, count_resolvent);
-      printf("size_clauses: %d\n", size_clauses);
-      add_clause(max_cls_idx+1, res, antecedents, 0);
+     
+      // NEW
+      push_resolvent(-lit);
+      int *tmp_res = copy_ints(resolvent, count_resolvent);
+      int *tmp_ants = copy_stack();
+      Clause *intermediate = add_clause(max_cls_idx+1, tmp_res, tmp_ants, 0);
+
+      // UPDATE
+      // TODO
+      // Note: right now endless loop because the clause doesn't change
+
+      intermediate->next_in_order = *clause;
+      (*clause)->resolved = 1;
+      *clause = intermediate;
+      break;
+      
+
+      
+      /*
+      count = length_ints (clause->antecedents);
+      clause->antecedents[iterations-1] = intermediate->idx;
+      int *tmp = copy_ints(clause->antecedents + iterations - 1, (count - iterations) + 1);
+      booleforce_delete_ints (clause->antecedents);
+      intermediate->next_in_order = clause;
+      clause = intermediate;
+      clause->resolved = 1;
+      */
     }
     pivlab = literals[-lit].label;
     literals[-lit].label = UNDEF;
 
 #ifndef NDEBUG
-    for (q = clause->literals; (idx2 = *q); q++) {
+    for (q = (*clause)->literals; (idx2 = *q); q++) {
       assert(idx2 != lit && idx2 != -lit);
     }
 #endif
@@ -2233,13 +2256,13 @@ resolve (Clause * clause)
   for (p = resolvent; (idx = *p); p++)
     literals[idx].mark = 0;
 
-  if (!subsumes (resolvent, clause->literals))
+  if (!subsumes (resolvent, (*clause)->literals))
     return check_error ("resolvent does not subsume clause %d at line %d",
-        clause->idx, clause->lineno);
+        (*clause)->idx, (*clause)->lineno);
 
-  if (!subsumes (clause->literals, resolvent))
+  if (!subsumes ((*clause)->literals, resolvent))
     return check_error ("clause %d at line %d does not subsume resolvent",
-        clause->idx, clause->lineno);
+        (*clause)->idx, (*clause)->lineno);
 
   count_resolvent = 0;
 
@@ -2248,27 +2271,28 @@ POST_PROCESS_RESOLVED_CHAIN:
 #ifdef BOOLEFORCE_LOG
   if (verbose > 1)
   {
-    fprintf (output, VPFX "checked clause %d: ", clause->idx);
-    printnl_ints (clause->literals);
+    fprintf (output, VPFX "checked clause %d: ", (*clause)->idx);
+    printnl_ints ((*clause)->literals);
   }
 #endif
 
-  if (!clause->antecedents)
+  if (!(*clause)->antecedents)
   {
     if (bintrace)
-      print_clause (clause, 0, bintrace);
+      print_clause (*clause, 0, bintrace);
 
     if (ebintrace)
-      print_clause (clause, 1, ebintrace);
+      print_clause (*clause, 1, ebintrace);
 
     if (hyperrestrace)
-      print_clause (clause, 1, hyperrestrace);
+      print_clause (*clause, 1, hyperrestrace);
   }
   else
     printf("split\n");
 
 #ifndef NDEBUG
-  clause->resolved = 1;
+  printf("clause->resolved: %d\n", (*clause)->idx);
+  (*clause)->resolved = 1;
 #endif
 
   return 1;
@@ -2612,6 +2636,40 @@ forall_clauses (int (*checker) (Clause *), const char *verbose_msg)
 }
 
 /*------------------------------------------------------------------------*/
+/* Traverse all collected clauses and apply the 'checker' to theses clauses.
+ * If one clause does not pass the check abort the traversal assuming that
+ * the checker itself already reported an error message.  On success the
+ * verbose message is printed
+ */
+  static int
+forall_clauses_manipulate (int (*checker) (Clause **), const char *verbose_msg)
+{
+  double start_time = booleforce_time_stamp ();
+  Clause **clause;
+
+  for (clause = &first_in_order; *clause; clause = &(*clause)->next_in_order)
+  {
+    printf("\n");
+    printf("idx: %d\n", (*clause)->idx);
+    printf("\n");
+#ifndef NDEBUG
+    check_prestine_chain (*clause);
+#endif
+
+    if (!checker (clause))
+      return 0;
+#ifndef NDEBUG
+    check_prestine_chain (*clause);
+#endif
+  }
+
+  if (verbose)
+    booleforce_report (start_time, output, VPFX "%s", verbose_msg);
+
+  return 1;
+}
+
+/*------------------------------------------------------------------------*/
 
   static void
 generate_new_indices (void)
@@ -2685,7 +2743,7 @@ check (void)
   if (rpttrace)
     write_rpt_header ();
 
-  if (!forall_clauses (resolve, "resolution"))
+  if (!forall_clauses_manipulate (resolve, "resolution"))
     return 0;
 
   return 1;
@@ -2730,6 +2788,7 @@ release (void)
   release_stack ();
   release_roots ();
   release_resolvent ();
+  release_labels ();
 
   if (literals)
     release_literals ();
