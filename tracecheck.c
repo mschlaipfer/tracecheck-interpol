@@ -518,6 +518,9 @@ delete_clause (Clause * clause)
   if (clause->antecedents)
     booleforce_delete_ints (clause->antecedents);
 
+  if (clause->labels)
+    booleforce_delete_ints (clause->labels);
+
   booleforce_delete (clause, sizeof (*clause));
 }
 
