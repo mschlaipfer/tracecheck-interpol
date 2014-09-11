@@ -1148,7 +1148,6 @@ link_derived_clauses (void)
   static int
 color_clause (Clause * clause)
 {
-  printf("coloring: %d\n", clause->idx);
   int * p, lit;
   if (clause->antecedents)
     return check_error ("clause has antecedents");
@@ -1763,7 +1762,6 @@ collect_literals (Clause * clause)
     {
       *q++ = lit;
       *r++ = literals[lit].label;
-      printf("lit: %d %d\n", lit, literals[lit].label);
     }
     // if lit appears more than once with mark == 1 in stack before this loop:
     // as mark is reset, rest is ignored
@@ -1771,7 +1769,6 @@ collect_literals (Clause * clause)
     literals[lit].mark = 0;
     literals[lit].label = UNDEF;
   }
-  printf("\n");
 
   count_stack = q - stack;
   count_labels = r - labels;
@@ -1863,12 +1860,10 @@ add_literal_to_resolvent (int idx, short label)
   static void
 add_to_resolvent_except (Clause * clause, int idx)
 {
-  printf("clause->idx: %d %d\n", clause->idx, clause->partition);
   int *p, other;
 
   for (p = clause->literals; (other = *p); p++)
   {
-    printf("other: %d\n", other);
     /* Skip resolved literal
      */
     if (other == idx)
@@ -1918,7 +1913,7 @@ print_resolvent (const char *type)
 /*------------------------------------------------------------------------*/
 
   inline static int
-resolve_clause (Clause * clause, Clause * context)
+resolve_clause (Clause * clause, Clause * context, short pivlab)
 {
   int idx;
 
@@ -1932,7 +1927,12 @@ resolve_clause (Clause * clause, Clause * context)
     LOG ("resolving clause %d on literal %d", clause->idx, idx);
 #endif
 
+  // TODO don't enter this either, but then also don't add literal outside
   remove_literal_from_resolvent (-idx);
+  // TODO what about merge of literal labels happening after this if in
+  // add_to_resolvent_except?
+  if (pivlab != UNDEF && pivlab != literals[idx].label)
+    return idx;
   add_to_resolvent_except (clause, idx);
 
   return idx;
@@ -2135,6 +2135,7 @@ resolve (Clause ** clause)
 #endif
 
   antecedent = idx2clause (idx);
+  printf("idx: %d\n", antecedent->idx);
   assert (antecedent);
   assert (antecedent->resolved);	/* check topological order */
 
@@ -2170,11 +2171,12 @@ resolve (Clause ** clause)
     iterations++;
 
     antecedent = idx2clause (idx);
+    printf("idx: %d\n", antecedent->idx);
     push_stack(idx);
     assert (antecedent);
     assert (antecedent->resolved);
 
-    if (!(lit = resolve_clause (antecedent, (*clause))))
+    if (!(lit = resolve_clause (antecedent, (*clause), pivlab)))
       return 0;
 
     // Note: careful with lit/idx
@@ -2193,7 +2195,7 @@ resolve (Clause ** clause)
       // NEW
       push_resolvent(-lit);
       push_labels(literals[-lit].label);
-      // TODO push labels
+
       int *tmp_res = copy_ints(resolvent, count_resolvent);
       int *tmp_ants = copy_stack();
       int new_idx = max_cls_idx + 1;
@@ -2307,10 +2309,10 @@ POST_PROCESS_RESOLVED_CHAIN:
       print_clause (*clause, 1, hyperrestrace);
   }
   else
-    printf("split\n");
+    printf("SPLIT\n");
+  printf("\n");
 
 #ifndef NDEBUG
-  printf("clause->resolved: %d\n", (*clause)->idx);
   (*clause)->resolved = 1;
 #endif
 
@@ -2668,9 +2670,6 @@ forall_clauses_manipulate (int (*checker) (Clause **), const char *verbose_msg)
 
   for (clause = &first_in_order; *clause; clause = &(*clause)->next_in_order)
   {
-    printf("\n");
-    printf("idx: %d\n", (*clause)->idx);
-    printf("\n");
 #ifndef NDEBUG
     check_prestine_chain (*clause);
 #endif
