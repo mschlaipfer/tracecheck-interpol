@@ -1148,6 +1148,7 @@ link_derived_clauses (void)
   static int
 color_clause (Clause * clause)
 {
+  printf("coloring: %d\n", clause->idx);
   int * p, lit;
   if (clause->antecedents)
     return check_error ("clause has antecedents");
@@ -1843,6 +1844,7 @@ remove_literal_from_resolvent (int idx)
   static void
 add_literal_to_resolvent (int idx, short label)
 {
+  printf("add: %d %d\n", idx, label);
   Literal *lit;
 
   lit = literals + idx;
@@ -1852,6 +1854,7 @@ add_literal_to_resolvent (int idx, short label)
   lit->mark = count_resolvent + 1;
   lit->label = label;
   push_resolvent (idx);
+  literals[idx].label = label;
   assert (resolvent[lit->mark - 1] == idx);
 }
 
@@ -1860,10 +1863,12 @@ add_literal_to_resolvent (int idx, short label)
   static void
 add_to_resolvent_except (Clause * clause, int idx)
 {
+  printf("clause->idx: %d %d\n", clause->idx, clause->partition);
   int *p, other;
 
   for (p = clause->literals; (other = *p); p++)
   {
+    printf("other: %d\n", other);
     /* Skip resolved literal
      */
     if (other == idx)
@@ -1871,10 +1876,13 @@ add_to_resolvent_except (Clause * clause, int idx)
 
     /* skip literals already part of resolvent
      */
-    if (literals[other].mark)
+    if (literals[other].mark) {
+      // TODO don't set if NEW SPLIT
+      literals[other].label |= clause->labels[p - clause->literals];
+      printf("merge: %d %d %d\n", other, clause->labels[p - clause->literals], clause->idx);
       continue;
+    }
 
-    printf("adding: %d\n", other);
     add_literal_to_resolvent (other, clause->labels[p - clause->literals]);
   }
 }
@@ -2127,7 +2135,6 @@ resolve (Clause ** clause)
 #endif
 
   antecedent = idx2clause (idx);
-  printf("ant idx: %d\n", antecedent->idx);
   assert (antecedent);
   assert (antecedent->resolved);	/* check topological order */
 
@@ -2177,18 +2184,30 @@ resolve (Clause ** clause)
       printf("NEW SPLIT %d -> %d\n", pivlab, literals[-lit].label);
       
       for (i = 0; i < count_resolvent; i++)
-        printf ("%d ", resolvent[i]);
-      printf("\n");
+      {
+        push_labels(literals[resolvent[i]].label);
+        printf ("%d [%d] ", resolvent[i], literals[resolvent[i]].label);
+      }
+      printf("%d [%d]\n", -lit, literals[-lit].label);
      
       // NEW
       push_resolvent(-lit);
+      push_labels(literals[-lit].label);
+      // TODO push labels
       int *tmp_res = copy_ints(resolvent, count_resolvent);
       int *tmp_ants = copy_stack();
-      Clause *intermediate = add_clause(max_cls_idx+1, tmp_res, tmp_ants, 0);
+      int new_idx = max_cls_idx + 1;
+      Clause *intermediate = add_clause(new_idx, tmp_res, tmp_ants, 0);
+      intermediate->labels = copy_labels();
 
       // UPDATE
       // TODO
       // Note: right now endless loop because the clause doesn't change
+      
+      // remove antecedents
+      (*clause)->antecedents += (iterations - 1);
+      (*clause)->antecedents[0] = new_idx;
+      // add new resolvent
 
       intermediate->next_in_order = *clause;
       (*clause)->resolved = 1;
