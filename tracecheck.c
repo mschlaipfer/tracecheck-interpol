@@ -1747,7 +1747,7 @@ collect_literals (Clause * clause)
 
       push_stack (lit);
       // TODO
-      // value doesn't matter, but make sure size is fine
+      // value doesn't matter, just make sure size of labels is fine
       // maybe booleforce new array after loop with stack size better
       push_labels (label);
     }
@@ -1817,7 +1817,6 @@ pivot (Clause * clause, Clause * context)
   static void
 remove_literal_from_resolvent (int idx)
 {
-  printf("removing: %d\n", idx);
   int pos, last;
 
   pos = literals[idx].mark;
@@ -1844,7 +1843,6 @@ remove_literal_from_resolvent (int idx)
   static void
 add_literal_to_resolvent (int idx, short label)
 {
-  printf("add: %d %d\n", idx, label);
   Literal *lit;
 
   lit = literals + idx;
@@ -1875,9 +1873,7 @@ add_to_resolvent_except (Clause * clause, int idx)
     /* skip literals already part of resolvent
      */
     if (literals[other].mark) {
-      // TODO don't set if NEW SPLIT
       literals[other].label |= clause->labels[p - clause->literals];
-      printf("merge: %d %d %d\n", other, clause->labels[p - clause->literals], clause->idx);
       continue;
     }
 
@@ -1930,12 +1926,11 @@ resolve_clause (Clause * clause, Clause * context, short pivlab)
     LOG ("resolving clause %d on literal %d", clause->idx, idx);
 #endif
 
-  // TODO don't enter this either, but then also don't add literal outside
-  remove_literal_from_resolvent (-idx);
-  // TODO what about merge of literal labels happening after this if in
-  // add_to_resolvent_except?
-  if (pivlab != UNDEF && pivlab != literals[idx].label)
+  // check whether chain is contiguously labeled.
+  if (pivlab != UNDEF && pivlab != literals[-idx].label)
     return idx;
+
+  remove_literal_from_resolvent (-idx);
   add_to_resolvent_except (clause, idx);
 
   return idx;
@@ -2138,7 +2133,6 @@ resolve (Clause ** clause)
 #endif
 
   antecedent = idx2clause (idx);
-  printf("idx: %d\n", antecedent->idx);
   assert (antecedent);
   assert (antecedent->resolved);	/* check topological order */
 
@@ -2163,7 +2157,6 @@ resolve (Clause ** clause)
    */
   iterations = 0;
   pivlab = UNDEF;
-  // TODO split after contiguous chain of equally colored pivots.
   while ((idx = *p++))
   {
 #ifdef BOOLEFORCE_LOG
@@ -2174,7 +2167,6 @@ resolve (Clause ** clause)
     iterations++;
 
     antecedent = idx2clause (idx);
-    printf("idx: %d\n", antecedent->idx);
     push_stack(idx);
     assert (antecedent);
     assert (antecedent->resolved);
@@ -2182,23 +2174,15 @@ resolve (Clause ** clause)
     if (!(lit = resolve_clause (antecedent, (*clause), pivlab)))
       return 0;
 
+    // check whether chain is contiguously labeled.
     // Note: careful with lit/idx
-    
     if (pivlab != UNDEF && pivlab != literals[-lit].label)
     {
-      printf("NEW SPLIT %d -> %d\n", pivlab, literals[-lit].label);
-      
       for (i = 0; i < count_resolvent; i++)
-      {
         push_labels(literals[resolvent[i]].label);
-        printf ("%d [%d] ", resolvent[i], literals[resolvent[i]].label);
-      }
-      printf("%d [%d]\n", -lit, literals[-lit].label);
-     
-      // NEW
-      push_resolvent(-lit);
-      push_labels(literals[-lit].label);
-
+      //printf("NEW SPLIT %d -> %d\n", pivlab, literals[-lit].label);
+      // NEW SPLIT
+      // create intermediate clause
       int *tmp_res = copy_ints(resolvent, count_resolvent);
       int *tmp_ants = copy_stack();
       int new_idx = max_cls_idx + 1;
@@ -2206,30 +2190,17 @@ resolve (Clause ** clause)
       intermediate->labels = copy_labels();
 
       // UPDATE
-      // TODO
-      // Note: right now endless loop because the clause doesn't change
-      
+      // TODO are we leaking addresses up to iterations-2?
       // remove antecedents
       (*clause)->antecedents += (iterations - 1);
+      // add new resolvent as antecedent
       (*clause)->antecedents[0] = new_idx;
-      // add new resolvent
 
       intermediate->next_in_order = *clause;
       (*clause)->resolved = 1;
       *clause = intermediate;
+      // TODO this here: literals[-lit].label = UNDEF; ???
       break;
-      
-
-      
-      /*
-      count = length_ints (clause->antecedents);
-      clause->antecedents[iterations-1] = intermediate->idx;
-      int *tmp = copy_ints(clause->antecedents + iterations - 1, (count - iterations) + 1);
-      booleforce_delete_ints (clause->antecedents);
-      intermediate->next_in_order = clause;
-      clause = intermediate;
-      clause->resolved = 1;
-      */
     }
     pivlab = literals[-lit].label;
     literals[-lit].label = UNDEF;
@@ -2263,6 +2234,16 @@ resolve (Clause ** clause)
           count_resolvent, resolvent);
     prev = count++;
   }
+
+  /*
+  for (i = 0; i < count_resolvent; i++)
+  {
+    push_labels(literals[resolvent[i]].label);
+    printf ("%d [%d] ", resolvent[i], literals[resolvent[i]].label);
+  }
+  printf("\n");
+  */
+
   if (hyperrestrace)
     fprintf (hyperrestrace, " 0\n");
 
@@ -2311,9 +2292,6 @@ POST_PROCESS_RESOLVED_CHAIN:
     if (hyperrestrace)
       print_clause (*clause, 1, hyperrestrace);
   }
-  else
-    printf("SPLIT\n");
-  printf("\n");
 
 #ifndef NDEBUG
   (*clause)->resolved = 1;
