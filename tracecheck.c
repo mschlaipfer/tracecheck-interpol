@@ -2190,11 +2190,14 @@ resolve (Clause ** clause)
       intermediate->labels = copy_labels();
 
       // UPDATE
-      // TODO are we leaking addresses up to iterations-2?
-      // remove antecedents
-      (*clause)->antecedents += (iterations - 1);
-      // add new resolvent as antecedent
-      (*clause)->antecedents[0] = new_idx;
+      // remove antecedents (indices from 0 to (iterations-1))
+      // add new resolvent as antecedent at index (iterations-1)
+      // in order not to leak memory
+      // copy relevant memory region and free previously used memory
+      (*clause)->antecedents[iterations - 1] = new_idx;
+      int *tmp = copy_ints((*clause)->antecedents + (iterations - 1), length_ints((*clause)->antecedents) - (iterations - 1));
+      booleforce_delete_ints ((*clause)->antecedents);
+      (*clause)->antecedents = tmp;
 
       intermediate->next_in_order = *clause;
       (*clause)->resolved = 1;
