@@ -41,6 +41,11 @@
 
 /*------------------------------------------------------------------------*/
 
+#include "simpaig.h"
+#include "aiger.h"
+
+/*------------------------------------------------------------------------*/
+
 #define VPFX "c "		/* verbose output prefix string */
 #define EPFX "*** tracecheck: "	/* error message prefix string */
 
@@ -111,6 +116,7 @@ struct Clause
   int idx;			/* "<0"=original, ">0"=derived */
   int newidx;			/* "<0"=original, ">0"=derived */
   int mark;			/* graph traversal */
+  simpaig *itp; /* partial interpolant */
   unsigned lineno: 29;			/* where the definition started */
   unsigned partition : 3;
 #ifndef NDEBUG
@@ -145,6 +151,8 @@ struct Literal
   int mark;
   short label;
 
+  simpaig *aig;
+  unsigned idx;
   // global for whole proof
   short partition;
 };
@@ -235,6 +243,7 @@ static Clause *first_in_order;
 static Clause **clauses;
 static int size_clauses;
 static int max_cls_idx;
+static int empty_cls_idx;
 
 static int min_derived_idx;
 static int max_original_idx;
@@ -246,7 +255,13 @@ static int num_derived_clauses;
 static int num_derived_literals;
 
 static int partition_split;
-static int **labelling_function;
+
+static simpaigmgr *mgr;
+static simpaig **aigs;
+static aiger *expansion;
+
+static char *outbuffer;
+static unsigned size_outbuffer;
 
 enum Label {
   UNDEF = -1,
@@ -1492,6 +1507,21 @@ POSTFIX_PROCESSING:
 /*------------------------------------------------------------------------*/
 
   static void
+init_aigs (void)
+{
+  int lit;
+  for (lit = 1; lit <= max_lit_idx; lit++)
+  {
+    literals[lit].aig = simpaig_var (mgr, literals + lit, 0);
+    literals[lit].idx = lit;
+    literals[-lit].aig = simpaig_not (literals[lit].aig);
+    literals[-lit].idx = lit;
+  }
+}
+
+/*------------------------------------------------------------------------*/
+
+  static void
 init_literals (void)
 {
   double start_time = booleforce_time_stamp ();
@@ -1592,17 +1622,6 @@ mark_literals (int *zero_terminated_array, int mark)
   for (p = zero_terminated_array; (idx = *p); p++)
     literals[idx].mark = mark;
 }
-
-/*  static void
-unmark_literals (void)
-{
-  int idx;
-  for (idx = -max_lit_idx; idx <= max_lit_idx; idx++)
-  {
-    Literal * lit = literals + idx;
-    lit->resolved = 0;
-  }
-}*/
 
 
 /*------------------------------------------------------------------------*/
@@ -1722,10 +1741,20 @@ collect_literals (Clause * clause)
       short label = UNDEF;
       if (!antecedent->antecedents)
       {
+        // TODO visit always or just once?
         label = antecedent->partition;
+
+        if (antecedent->partition == A)
+          antecedent->itp = simpaig_false (mgr);
+        else if (antecedent->partition == B)
+          antecedent->itp = simpaig_true (mgr);
+        else
+          return check_error ("clause has to be in either A or B");
+          
         // partition(var(l))
         literals[-lit].partition = literals[lit].partition = 
           (literals[-lit].partition | literals[lit].partition | label);
+
       } else
         label = antecedent->labels[antecedent->literals - q];
 
@@ -2094,7 +2123,7 @@ check_prestine_chain (Clause * clause)
  * clauses, such they can be dumped afterwards.
  */
   static int
-resolve (Clause ** clause)
+resolve_and_split (Clause ** clause)
 {
   int *p, idx, iterations, len, count, prev, i, lit;
   short pivlab;
@@ -2133,6 +2162,7 @@ resolve (Clause ** clause)
 #endif
 
   antecedent = idx2clause (idx);
+  push_stack (idx);
   assert (antecedent);
   assert (antecedent->resolved);	/* check topological order */
 
@@ -2167,7 +2197,6 @@ resolve (Clause ** clause)
     iterations++;
 
     antecedent = idx2clause (idx);
-    push_stack(idx);
     assert (antecedent);
     assert (antecedent->resolved);
 
@@ -2178,6 +2207,7 @@ resolve (Clause ** clause)
     // Note: careful with lit/idx
     if (pivlab != UNDEF && pivlab != literals[-lit].label)
     {
+      // TODO: can this loop be handled better?
       for (i = 0; i < count_resolvent; i++)
         push_labels(literals[resolvent[i]].label);
       //printf("NEW SPLIT %d -> %d\n", pivlab, literals[-lit].label);
@@ -2200,11 +2230,19 @@ resolve (Clause ** clause)
       (*clause)->antecedents = tmp;
 
       intermediate->next_in_order = *clause;
+#ifndef NDEBUG
       (*clause)->resolved = 1;
+#endif
       *clause = intermediate;
       // TODO this here: literals[-lit].label = UNDEF; ???
       break;
     }
+    // else
+
+    // Note: lagging one iteration behind so that antecedent causing split is
+    // not included
+    push_stack(idx);
+
     pivlab = literals[-lit].label;
     literals[-lit].label = UNDEF;
 
@@ -2255,6 +2293,9 @@ resolve (Clause ** clause)
     print_resolvent ("last");
 #endif
 
+  if (count_resolvent == 0)
+    empty_cls_idx = (*clause)->idx;
+
   /* The final resolvent should be equal to the clause.  We check it by two
    * subsume tests, which, if one of them fails, gives a little bit more
    * information to the user.
@@ -2294,11 +2335,108 @@ POST_PROCESS_RESOLVED_CHAIN:
 
     if (hyperrestrace)
       print_clause (*clause, 1, hyperrestrace);
+  } else 
+  {
+    // init partial interpolants based on computation necessary for itp
+    // computation
+    // for disjunction of intermediate interpolants init with false, otherwise
+    // with true
+    (*clause)->partition = pivlab;
+    if (pivlab == A)
+      (*clause)->itp = simpaig_false (mgr);
+    else if (pivlab == B)
+      (*clause)->itp = simpaig_true (mgr);
+    else if (pivlab == AB) {
+      (*clause)->itp = simpaig_true (mgr);
+      // TODO support for 2nd approach: i.e. disjunction of I_i \wedge \neg{M_i}
+    }
   }
 
 #ifndef NDEBUG
   (*clause)->resolved = 1;
 #endif
+
+  return 1;
+}
+
+  static void
+mark_resolvent (Clause * clause)
+{
+  int *p, idx;
+
+  for (p = clause->literals; (idx = *p); p++)
+  {
+    assert(literals[idx].mark == 0);
+    literals[idx].mark = 1;
+  }
+}
+
+  static void
+unmark_resolvent (Clause * clause)
+{
+  int *p, idx;
+
+  for (p = clause->literals; (idx = *p); p++)
+  {
+    assert(literals[idx].mark);
+    literals[idx].mark = 0;
+  }
+}
+
+
+  static simpaig *
+compute_m (Clause * clause)
+{
+  int *p, idx;
+  simpaig * m;
+
+  m = simpaig_false (mgr);
+
+  for (p = clause->literals; (idx = *p); p++)
+  {
+    // TODO don't referenc m in simpaig_or?
+    if (!literals[idx].mark)
+      m = simpaig_or (mgr, m, literals[idx].aig);
+  }
+  return m;
+}
+
+  static int
+compute_itp (Clause * clause)
+{
+  int *p, idx;
+  Clause *antecedent;
+  simpaig *m, *intermediate_itp;
+
+  if (!clause->antecedents)
+    return 1;
+
+  assert (clause->antecedents);
+  p = clause->antecedents;
+
+  mark_resolvent (clause);
+
+  while ((idx = *p++))
+  {
+    antecedent = idx2clause (idx);
+    assert (antecedent);
+    if (clause->partition == AB)
+    {
+      m = compute_m (antecedent);
+      // conjunction of I_i \vee M_i
+      intermediate_itp = simpaig_or (mgr, antecedent->itp, m);
+      clause->itp = simpaig_and (mgr, clause->itp, intermediate_itp);
+      // TODO support for 2nd approach: i.e. disjunction of I_i \wedge \neg{M_i}
+    }
+    else if (clause->partition == A)
+      clause->itp = simpaig_or (mgr, clause->itp, antecedent->itp);
+    else if (clause->partition == B)
+      clause->itp = simpaig_and (mgr, clause->itp, antecedent->itp);
+    else
+      return check_error ("chain pivots have to be labelled A, B, or AB");
+  }
+
+  unmark_resolvent (clause);
 
   return 1;
 }
@@ -2703,6 +2841,85 @@ generate_new_indices (void)
         VPFX "mapped to %d new clause indices", newidx);
 }
 
+  static const char *
+next_symbol (unsigned idx)
+{
+  unsigned len;
+
+  len = 20;
+  len += 30;
+
+  if (size_outbuffer < len)
+  {
+    if (size_outbuffer)
+    {
+      while (size_outbuffer < len)
+        size_outbuffer *= 2;
+
+      outbuffer = realloc (outbuffer, size_outbuffer);
+    }
+    else
+      outbuffer = malloc (size_outbuffer = len);
+  }
+
+  sprintf (outbuffer, "x%u", idx);
+
+  return outbuffer;
+}
+
+  static void
+copyaig (simpaig * aig)
+{
+  simpaig *c0, *c1;
+  const char *name;
+  unsigned idx;
+
+  assert (aig);
+
+  aig = simpaig_strip (aig);
+  idx = simpaig_index (aig);
+  //printf("!idx: %d\n", !idx);
+  //printf("aigs[idx]: %d\n", aigs[idx]);
+  if (!idx || aigs[idx])
+    return;
+
+  aigs[idx] = aig;
+  if (simpaig_isand (aig))
+  {
+    c0 = simpaig_child (aig, 0);
+    c1 = simpaig_child (aig, 1);
+    copyaig (c0);
+    copyaig (c1);
+    aiger_add_and (expansion,
+        2*idx, // lhs
+        simpaig_unsigned_index (c0), // rhs1
+        simpaig_unsigned_index (c1)); // rhs2
+  }
+  else
+  {
+    name = 0;
+    input = simpaig_isvar (aig);
+    name = next_symbol (idx);
+    aiger_add_input (expansion, 2 * idx, name);
+  }
+}
+
+  static void
+expand (simpaig * aig)
+{
+  unsigned maxvar;
+  simpaig_assign_indices (mgr, aig);
+  maxvar = simpaig_max_index (mgr);
+  aigs = calloc (maxvar + 1, sizeof aigs[0]);
+  copyaig (aig);
+  aiger_add_output (expansion, simpaig_unsigned_index (aig), 0);
+  free (aigs);
+  simpaig_reset_indices (mgr);
+  free (outbuffer);
+}
+
+
+
 /*------------------------------------------------------------------------*/
 
   static int
@@ -2719,9 +2936,13 @@ check (void)
   if (!order ())
     return 0;
 
+  mgr = simpaig_init ();
+
   init_literals ();
 
   forall_clauses (collect_literals, "literal collection");
+
+  init_aigs ();
 
   if (!forall_clauses (normalize, "normalization"))
     return 0;
@@ -2745,11 +2966,20 @@ check (void)
   if (rpttrace)
     write_rpt_header ();
 
-  if (!forall_clauses_manipulate (resolve, "resolution"))
+  if (!forall_clauses_manipulate (resolve_and_split, "resolution"))
     return 0;
+
+  if (!forall_clauses (compute_itp, "interpolation"))
+    return 0;
+
+  expansion = aiger_init ();
+  expand(clauses[empty_cls_idx]->itp);
+  aiger_write_to_file (expansion, aiger_ascii_mode, stdout);
+  aiger_reset (expansion);
 
   return 1;
 }
+
 
 /*------------------------------------------------------------------------*/
 
@@ -3250,6 +3480,7 @@ tracecheck_main (int argc, char **argv)
         booleforce_max_bytes () / (double) (1 << 20));
   }
 
+  simpaig_reset (mgr);
   reset ();			/* no code between 'reset' and 'return' */
 
   return res;
