@@ -206,7 +206,7 @@ static int verbose;		/* verbose level */
 
 /*------------------------------------------------------------------------*/
 
-static FILE * hyperrestrace;
+static FILE * interpolant;
 static FILE * bintrace;
 static FILE * ebintrace;
 static FILE * restrace;
@@ -258,7 +258,7 @@ static int partition_split;
 
 static simpaigmgr *mgr;
 static simpaig **aigs;
-static aiger *expansion;
+static aiger *output_aig;
 
 static char *outbuffer;
 static unsigned size_outbuffer;
@@ -2135,9 +2135,6 @@ resolve_and_split (Clause ** clause)
   if (!(*clause)->antecedents)
     goto POST_PROCESS_RESOLVED_CHAIN;
 
-  if (hyperrestrace)
-    fprintf (hyperrestrace, "%d *", (*clause)->idx);
-
 #ifdef BOOLEFORCE_LOG
   if (verbose > 1)
     LOG ("resolving antecedents of clause %d", (*clause)->idx);
@@ -2147,8 +2144,6 @@ resolve_and_split (Clause ** clause)
 
   assert ((*clause)->antecedents);
   p = (*clause)->antecedents;
-  if (hyperrestrace)
-    fprintf (hyperrestrace, " %d", *p);
   idx = *p++;
 
   if (!idx)
@@ -2252,9 +2247,6 @@ resolve_and_split (Clause ** clause)
     }
 #endif
     
-    if (hyperrestrace)
-      fprintf (hyperrestrace, " %d", idx);
-
     if (bintrace)
       fprintf (bintrace, "%d * %d %d 0\n", count, prev, antecedent->newidx);
 
@@ -2284,9 +2276,6 @@ resolve_and_split (Clause ** clause)
   }
   printf("\n");
   */
-
-  if (hyperrestrace)
-    fprintf (hyperrestrace, " 0\n");
 
 #ifdef BOOLEFORCE_LOG
   if (verbose > 1)
@@ -2333,8 +2322,6 @@ POST_PROCESS_RESOLVED_CHAIN:
     if (ebintrace)
       print_clause (*clause, 1, ebintrace);
 
-    if (hyperrestrace)
-      print_clause (*clause, 1, hyperrestrace);
   } else 
   {
     // init partial interpolants based on computation necessary for itp
@@ -2841,6 +2828,10 @@ generate_new_indices (void)
         VPFX "mapped to %d new clause indices", newidx);
 }
 
+/*------------------------------------------------------------------------*/
+/* expand, copyaig, next_symbol taken from aigunroll.c to copy simpaig data
+ * structure into aiger data structure, which allows to print the AIG.
+ */
   static const char *
 next_symbol (unsigned idx)
 {
@@ -2870,6 +2861,7 @@ next_symbol (unsigned idx)
   static void
 copyaig (simpaig * aig)
 {
+  Literal *aig_input;
   simpaig *c0, *c1;
   const char *name;
   unsigned idx;
@@ -2890,17 +2882,17 @@ copyaig (simpaig * aig)
     c1 = simpaig_child (aig, 1);
     copyaig (c0);
     copyaig (c1);
-    aiger_add_and (expansion,
-        2*idx, // lhs
+    aiger_add_and (output_aig,
+        2 * idx, // lhs
         simpaig_unsigned_index (c0), // rhs1
         simpaig_unsigned_index (c1)); // rhs2
   }
   else
   {
     name = 0;
-    input = simpaig_isvar (aig);
-    name = next_symbol (idx);
-    aiger_add_input (expansion, 2 * idx, name);
+    aig_input = simpaig_isvar (aig);
+    name = next_symbol (aig_input->idx);
+    aiger_add_input (output_aig, 2 * idx, name);
   }
 }
 
@@ -2912,7 +2904,7 @@ expand (simpaig * aig)
   maxvar = simpaig_max_index (mgr);
   aigs = calloc (maxvar + 1, sizeof aigs[0]);
   copyaig (aig);
-  aiger_add_output (expansion, simpaig_unsigned_index (aig), 0);
+  aiger_add_output (output_aig, simpaig_unsigned_index (aig), 0);
   free (aigs);
   simpaig_reset_indices (mgr);
   free (outbuffer);
@@ -2971,11 +2963,6 @@ check (void)
 
   if (!forall_clauses (compute_itp, "interpolation"))
     return 0;
-
-  expansion = aiger_init ();
-  expand(clauses[empty_cls_idx]->itp);
-  aiger_write_to_file (expansion, aiger_ascii_mode, stdout);
-  aiger_reset (expansion);
 
   return 1;
 }
@@ -3065,6 +3052,12 @@ reset (void)
   {
     booleforce_close_file (restrace);
     restrace = 0;
+  }
+
+  if (interpolant)
+  {
+    booleforce_close_file (interpolant);
+    interpolant = 0;
   }
 
   booleforce_reset_mem ();
@@ -3168,22 +3161,23 @@ SKIP:
 "\n" \
 "where <option> is one of the following:\n" \
 "\n" \
-"  -h           print this command line option summary\n" \
-"  --version    print this command line option summary\n" \
-"  --config     print configuration options\n" \
-"  --id         print CVS/RCS id\n" \
-"  -v[<inc>]    increase verbose level by <inc> (default 1)\n" \
-"  --linear     assume that chains are already linearized\n" \
-"  --lax        ignore multiple occurrences and left over antecedents\n" \
-"  --print      parse input file, print trace and exit\n" \
-"  --debug      enable internal consistency checking\n" \
-"  -e<idx>      first defined variable index in extended resolution trace\n" \
-"  -b <proof>   generate compact binary resolution trace\n" \
-"  -B <proof>   generate extended binary resolution trace\n" \
-"  -r <proof>   generate compact binary resolution trace in RPT format\n" \
-"  -R <proof>   generate extended binary resolution proof in RES format\n" \
-"  -c <cnf>     specify original CNF for '-r' and '-R'\n" \
-"  -o <output>  set output file (for verbose and error output)\n" \
+"  -h                print this command line option summary\n" \
+"  --version         print this command line option summary\n" \
+"  --config          print configuration options\n" \
+"  --id              print CVS/RCS id\n" \
+"  -v[<inc>]         increase verbose level by <inc> (default 1)\n" \
+"  --linear          assume that chains are already linearized\n" \
+"  --lax             ignore multiple occurrences and left over antecedents\n" \
+"  --print           parse input file, print trace and exit\n" \
+"  --debug           enable internal consistency checking\n" \
+"  -e<idx>           first defined variable index in extended resolution trace\n" \
+"  -b <proof>        generate compact binary resolution trace\n" \
+"  -B <proof>        generate extended binary resolution trace\n" \
+"  -r <proof>        generate compact binary resolution trace in RPT format\n" \
+"  -R <proof>        generate extended binary resolution proof in RES format\n" \
+"  -i <interpolant>  generate Craig interpolant from hyper resolution proof\n" \
+"  -c <cnf>          specify original CNF for '-r' and '-R'\n" \
+"  -o <output>       set output file (for verbose and error output)\n" \
 "\n" \
 "Verbose level of 1 just prints statistics, while verbose level of two\n" \
 "and larger allows debugging of the input trace (and 'tracecheck').\n"
@@ -3276,17 +3270,17 @@ tracecheck_main (int argc, char **argv)
       else
         verbose++;
     }
-    else if (!strcmp (argv[i], "--hyperres"))
+    else if (!strcmp (argv[i], "-i"))
     {
       if (++i == argc)
-        res = option_error ("argument to '--hyperres' missing");
-      else if (hyperrestrace)
-        res = option_error ("multiple '--hyperres' options");
+        res = option_error ("argument to '-i' missing");
+      else if (interpolant)
+        res = option_error ("multiple '-i' options");
       else
       {
         file = booleforce_open_file_for_writing (argv[i]);
         if (file)
-          hyperrestrace = file;
+          interpolant = file;
         else
           res = option_error ("can not write to '%s'", argv[i]);
       }
@@ -3452,12 +3446,19 @@ tracecheck_main (int argc, char **argv)
       {
         if (check ())
         {
+          output_aig = aiger_init ();
+          expand(clauses[empty_cls_idx]->itp);
+          if (interpolant)
+            aiger_write_to_file (output_aig, aiger_ascii_mode, interpolant);
+          aiger_reset (output_aig);
+          simpaig_reset (mgr);
+
           fprintf (output,
-              "resolved %d root%s and %d empty clause%s\n",
-              count_roots,
-              count_roots == 1 ? "" : "s",
-              num_empty_clauses,
-              num_empty_clauses == 1 ? "" : "s");
+            "resolved %d root%s and %d empty clause%s\n",
+            count_roots,
+            count_roots == 1 ? "" : "s",
+            num_empty_clauses,
+            num_empty_clauses == 1 ? "" : "s");
         }
         else
           res = 1;
@@ -3480,7 +3481,6 @@ tracecheck_main (int argc, char **argv)
         booleforce_max_bytes () / (double) (1 << 20));
   }
 
-  simpaig_reset (mgr);
   reset ();			/* no code between 'reset' and 'return' */
 
   return res;
