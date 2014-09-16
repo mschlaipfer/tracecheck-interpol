@@ -257,8 +257,16 @@ static int num_derived_literals;
 static int partition_split;
 
 static simpaigmgr *mgr;
+static simpaig *final_itp;
 static simpaig **aigs;
 static aiger *output_aig;
+
+/*
+#ifndef NDEBUG
+static simpaig *partition_a;
+static simpaig *partition_b;
+#endif
+*/
 
 static char *outbuffer;
 static unsigned size_outbuffer;
@@ -2381,7 +2389,6 @@ compute_m (Clause * clause)
 
   for (p = clause->literals; (idx = *p); p++)
   {
-    // TODO don't referenc m in simpaig_or?
     if (!literals[idx].mark)
       m = simpaig_or (mgr, m, literals[idx].aig);
   }
@@ -2910,7 +2917,47 @@ expand (simpaig * aig)
   free (outbuffer);
 }
 
+/*------------------------------------------------------------------------*/
+/*
+#ifndef NDEBUG
 
+  static simpaig *
+compute_cl (Clause * clause)
+{
+  int *p, idx;
+  simpaig * cl;
+
+  cl = simpaig_false (mgr);
+
+  for (p = clause->literals; (idx = *p); p++)
+  {
+    cl = simpaig_or (mgr, cl, literals[idx].aig);
+  }
+
+  return cl;
+}
+
+  static int
+compute_partition_aigs (Clause * clause)
+{
+  simpaig * cl;
+
+  if (clause->antecedents)
+    return 1;
+
+  cl = compute_cl (clause);
+  if (clause->partition == A)
+    partition_a = simpaig_and (mgr, partition_a, cl);
+  else if (clause->partition == B)
+    partition_b = simpaig_and (mgr, partition_b, cl);
+  else
+    return check_error("Initial vertices either in A or B");
+  
+  return 1;
+}
+
+#endif
+*/
 
 /*------------------------------------------------------------------------*/
 
@@ -2963,6 +3010,21 @@ check (void)
 
   if (!forall_clauses (compute_itp, "interpolation"))
     return 0;
+
+/*
+  // This isn't working, probably due to aigs not being simplified?
+#ifndef NDEBUG
+  partition_a = simpaig_true (mgr);
+  partition_b = simpaig_true (mgr);
+  forall_clauses (compute_partition_aigs, "partition aigs");
+
+  final_itp = clauses[empty_cls_idx]->itp;
+  //assert (simpaig_isfalse (simpaig_and (mgr, partition_a, partition_b)));
+
+  //assert (simpaig_istrue (simpaig_implies (mgr, partition_a, final_itp)));
+  assert (simpaig_istrue (simpaig_implies (mgr, final_itp, partition_b)));
+#endif
+*/
 
   return 1;
 }
@@ -3447,7 +3509,8 @@ tracecheck_main (int argc, char **argv)
         if (check ())
         {
           output_aig = aiger_init ();
-          expand(clauses[empty_cls_idx]->itp);
+          final_itp = clauses[empty_cls_idx]->itp;
+          expand (final_itp);
           if (interpolant)
             aiger_write_to_file (output_aig, aiger_ascii_mode, interpolant);
           aiger_reset (output_aig);
