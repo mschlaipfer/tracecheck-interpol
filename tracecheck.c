@@ -206,6 +206,8 @@ static int verbose;		/* verbose level */
 
 /*------------------------------------------------------------------------*/
 
+static FILE * split_input;
+static FILE * stats_file;
 static FILE * interpolant;
 static FILE * bintrace;
 static FILE * ebintrace;
@@ -286,6 +288,8 @@ DeclareIntStack (stack);
 DeclareIntStack (roots);
 DeclareIntStack (trail);
 DeclareIntStack (labels);
+DeclareIntStack (before_split);
+DeclareIntStack (after_split);
 
 /*------------------------------------------------------------------------*/
 
@@ -350,6 +354,8 @@ DefineIntStackFunctions(resolvent)
 DefineIntStackFunctions(roots)
 DefineIntStackFunctions(trail);
 DefineIntStackFunctions(labels);
+DefineIntStackFunctions(before_split);
+DefineIntStackFunctions(after_split);
 /* *INDENT-ON* */
 /*------------------------------------------------------------------------*/
 
@@ -899,7 +905,19 @@ NEXT_CLAUSE:
     return 0;
   }
 
-  antecedents = count_stack ? copy_stack () : 0;
+  // Note: delete parsed literals if there are antecedents
+  // We have to enter collect_literals for labelling, so we only support '*'
+  // literal lists for internal vertices
+  // TODO Maybe allow labelling through input file, then this could be changed
+  if (count_stack)
+  {
+    if (literals)
+      BOOLEFORCE_DELETE_ARRAY (literals, length_ints (literals) + 1);
+    literals = 0;
+    antecedents = copy_stack ();
+  } else
+    antecedents = 0;
+
   if (!literals && !antecedents)
     return parse_error ("original clause without literals");
 
@@ -1088,9 +1106,8 @@ parse (void)
     res = parse_ascii ();
 
     // 25% <- 50% -> 25%
-    partition_split = rand_lim(num_original_clauses / 2)
-                    + num_original_clauses / 4 + 2;
-    partition_split = 4; // TODO debugging
+    if (!partition_split)
+      partition_split = rand_lim(num_original_clauses / 2) + num_original_clauses / 4 + 2;
   }
 
   if (res && verbose)
@@ -1545,10 +1562,17 @@ init_literals (void)
 
     if (!clause->antecedents)
     {
-      if (clause->lineno < partition_split)
+      if (clause->idx <= partition_split)
+      {
         clause->partition = A;
+        clause->itp = simpaig_false (mgr);
+      }
       else
+      {
         clause->partition = B;
+        clause->itp = simpaig_true (mgr);
+      }
+
       color_clause(clause);
     }
 
@@ -1728,10 +1752,12 @@ normalize (Clause * clause)
   static int
 collect_literals (Clause * clause)
 {
-  int idx, * p, * q, * r, lit;
+  int idx, * p, * q, lit;
   Clause * antecedent;
 
-  if (clause->literals)
+  // Note: Collect literals for all internal vertices, no matter if literal list
+  // supplied or not
+  if (!clause->antecedents/*clause->literals*/)
     return 1;
 
   assert (!count_stack);
@@ -1752,19 +1778,12 @@ collect_literals (Clause * clause)
         // TODO visit always or just once?
         label = antecedent->partition;
 
-        if (antecedent->partition == A)
-          antecedent->itp = simpaig_false (mgr);
-        else if (antecedent->partition == B)
-          antecedent->itp = simpaig_true (mgr);
-        else
-          return check_error ("clause has to be in either A or B");
-          
         // partition(var(l))
         literals[-lit].partition = literals[lit].partition = 
           (literals[-lit].partition | literals[lit].partition | label);
 
       } else
-        label = antecedent->labels[antecedent->literals - q];
+        label = antecedent->labels[q - antecedent->literals];
 
 
       if (literals[lit].mark == 1)
@@ -1783,10 +1802,6 @@ collect_literals (Clause * clause)
         return check_error ("literal %d too large", lit);
 
       push_stack (lit);
-      // TODO
-      // value doesn't matter, just make sure size of labels is fine
-      // maybe booleforce new array after loop with stack size better
-      push_labels (label);
     }
   }
 
@@ -1794,14 +1809,13 @@ collect_literals (Clause * clause)
    * one phase.
    */
   q = stack;
-  r = labels;
   for (p = stack; p < stack + count_stack; p++)
   {
     lit = *p;
     if (literals[lit].mark == 1)
     {
       *q++ = lit;
-      *r++ = literals[lit].label;
+      push_labels(literals[lit].label);
     }
     // if lit appears more than once with mark == 1 in stack before this loop:
     // as mark is reset, rest is ignored
@@ -1811,7 +1825,6 @@ collect_literals (Clause * clause)
   }
 
   count_stack = q - stack;
-  count_labels = r - labels;
 
   if (!count_stack)
     num_empty_clauses++;
@@ -2247,7 +2260,7 @@ resolve_and_split (Clause ** clause)
     push_stack(idx);
 
     pivlab = literals[-lit].label;
-    literals[-lit].label = UNDEF;
+    literals[-lit].label = UNDEF; // ???
 
 #ifndef NDEBUG
     for (q = (*clause)->literals; (idx2 = *q); q++) {
@@ -2293,6 +2306,8 @@ resolve_and_split (Clause ** clause)
   if (count_resolvent == 0)
     empty_cls_idx = (*clause)->idx;
 
+  if(!(*clause)->labels)
+    printf("clause idx: %d\n", (*clause)->idx);
   /* The final resolvent should be equal to the clause.  We check it by two
    * subsume tests, which, if one of them fails, gives a little bit more
    * information to the user.
@@ -2300,7 +2315,10 @@ resolve_and_split (Clause ** clause)
   push_resolvent (0);		/* sentinel */
 
   for (p = resolvent; (idx = *p); p++)
+  {
     literals[idx].mark = 0;
+    literals[idx].label = UNDEF; //???
+  }
 
   if (!subsumes (resolvent, (*clause)->literals))
     return check_error ("resolvent does not subsume clause %d at line %d",
@@ -2383,14 +2401,25 @@ unmark_resolvent (Clause * clause)
 compute_m (Clause * clause)
 {
   int *p, idx;
-  simpaig * m;
+  simpaig * m, * tmp;
 
   m = simpaig_false (mgr);
 
   for (p = clause->literals; (idx = *p); p++)
   {
     if (!literals[idx].mark)
-      m = simpaig_or (mgr, m, literals[idx].aig);
+    {
+      // create aigs on demand
+      /*if (!literals[idx].aig) {
+        literals[idx].aig = simpaig_var (mgr, literals + idx, 0);
+        literals[idx].idx = idx;
+        literals[-idx].aig = simpaig_not (literals[idx].aig);
+        literals[-idx].idx = idx;
+      }*/
+      tmp = simpaig_or (mgr, m, literals[idx].aig);
+      simpaig_dec(mgr, m);
+      m = tmp;
+    }
   }
   return m;
 }
@@ -2398,9 +2427,9 @@ compute_m (Clause * clause)
   static int
 compute_itp (Clause * clause)
 {
-  int *p, idx;
+  int *p, idx, iterations;
   Clause *antecedent;
-  simpaig *m, *intermediate_itp;
+  simpaig *m, *intermediate_itp, *tmp;
 
   if (!clause->antecedents)
     return 1;
@@ -2410,25 +2439,34 @@ compute_itp (Clause * clause)
 
   mark_resolvent (clause);
 
+  iterations = 0;
   while ((idx = *p++))
   {
+    iterations++;
     antecedent = idx2clause (idx);
     assert (antecedent);
+    assert (antecedent->itp);
     if (clause->partition == AB)
     {
       m = compute_m (antecedent);
       // conjunction of I_i \vee M_i
       intermediate_itp = simpaig_or (mgr, antecedent->itp, m);
-      clause->itp = simpaig_and (mgr, clause->itp, intermediate_itp);
+      simpaig_dec(mgr, m);
+      tmp = simpaig_and (mgr, clause->itp, intermediate_itp);
+      simpaig_dec(mgr, intermediate_itp);
       // TODO support for 2nd approach: i.e. disjunction of I_i \wedge \neg{M_i}
     }
     else if (clause->partition == A)
-      clause->itp = simpaig_or (mgr, clause->itp, antecedent->itp);
+      tmp = simpaig_or (mgr, clause->itp, antecedent->itp);
     else if (clause->partition == B)
-      clause->itp = simpaig_and (mgr, clause->itp, antecedent->itp);
+      tmp = simpaig_and (mgr, clause->itp, antecedent->itp);
     else
       return check_error ("chain pivots have to be labelled A, B, or AB");
+
+    simpaig_dec(mgr, clause->itp);
+    clause->itp = tmp;
   }
+  push_after_split(iterations);
 
   unmark_resolvent (clause);
 
@@ -2640,6 +2678,7 @@ linearize (Clause * clause)
 
   if (!clause->antecedents)
     return 1;
+  push_before_split(length_ints(clause->antecedents));
 
 #ifdef BOOLEFORCE_LOG
   if (verbose > 1)
@@ -3029,6 +3068,28 @@ check (void)
   return 1;
 }
 
+/*------------------------------------------------------------------------*/
+
+  static void
+print_stats (void)
+{
+  int i;
+  if(count_before_split)
+  {
+    fprintf (stats_file, "%s;%d", input_name, before_split[0]);
+    for (i = 1; i < count_before_split; i++)
+      fprintf (stats_file, ";%d", before_split[i]);
+    fprintf (stats_file, "\n");
+  }
+
+  if(count_after_split)
+  {
+    fprintf (stats_file, "%s;%d", input_name, after_split[0]);
+    for (i = 1; i < count_after_split; i++)
+      fprintf (stats_file, ";%d", after_split[i]);
+    fprintf (stats_file, "\n");
+  }
+}
 
 /*------------------------------------------------------------------------*/
 
@@ -3038,7 +3099,12 @@ release_literals (void)
   int i;
 
   for (i = -max_lit_idx; i <= max_lit_idx; i++)
+  {
+    if (i > 0)
+      simpaig_dec (mgr, literals[i].aig);
+
     RECYCLE_CELLS (literals[i].clauses);
+  }
 
   literals -= max_lit_idx;
   BOOLEFORCE_DELETE_ARRAY (literals, 2 * max_lit_idx + 1);
@@ -3070,6 +3136,8 @@ release (void)
   release_roots ();
   release_resolvent ();
   release_labels ();
+  release_before_split ();
+  release_after_split ();
 
   if (literals)
     release_literals ();
@@ -3120,6 +3188,12 @@ reset (void)
   {
     booleforce_close_file (interpolant);
     interpolant = 0;
+  }
+
+  if (stats_file)
+  {
+    fclose (stats_file);
+    stats_file = 0;
   }
 
   booleforce_reset_mem ();
@@ -3238,6 +3312,8 @@ SKIP:
 "  -r <proof>        generate compact binary resolution trace in RPT format\n" \
 "  -R <proof>        generate extended binary resolution proof in RES format\n" \
 "  -i <interpolant>  generate Craig interpolant from hyper resolution proof\n" \
+"  --split <clidx>   Clauses 0..clidx in A, rest in B\n" \
+"  -s <stats>        generate statistics\n" \
 "  -c <cnf>          specify original CNF for '-r' and '-R'\n" \
 "  -o <output>       set output file (for verbose and error output)\n" \
 "\n" \
@@ -3343,6 +3419,30 @@ tracecheck_main (int argc, char **argv)
         file = booleforce_open_file_for_writing (argv[i]);
         if (file)
           interpolant = file;
+        else
+          res = option_error ("can not write to '%s'", argv[i]);
+      }
+    }
+    else if (!strcmp (argv[i], "--split"))
+    {
+      if (++i == argc)
+        res = option_error ("argument to '--split' missing");
+      else if (interpolant)
+        res = option_error ("multiple '--split' options");
+      else
+        partition_split = atoi (argv[i]);
+    }
+    else if (!strcmp (argv[i], "-s"))
+    {
+      if (++i == argc)
+        res = option_error ("argument to '-s' missing");
+      else if (stats_file)
+        res = option_error ("multiple '-s' options");
+      else
+      {
+        file = fopen (argv[i], "a");
+        if (file)
+          stats_file = file;
         else
           res = option_error ("can not write to '%s'", argv[i]);
       }
@@ -3513,8 +3613,11 @@ tracecheck_main (int argc, char **argv)
           expand (final_itp);
           if (interpolant)
             aiger_write_to_file (output_aig, aiger_ascii_mode, interpolant);
+          simpaig_dec (mgr, final_itp);
           aiger_reset (output_aig);
-          simpaig_reset (mgr);
+
+          if (stats_file)
+            print_stats ();
 
           fprintf (output,
             "resolved %d root%s and %d empty clause%s\n",
@@ -3545,6 +3648,7 @@ tracecheck_main (int argc, char **argv)
   }
 
   reset ();			/* no code between 'reset' and 'return' */
+  simpaig_reset (mgr);
 
   return res;
 }
