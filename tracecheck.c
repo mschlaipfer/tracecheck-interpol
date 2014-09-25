@@ -206,7 +206,6 @@ static int verbose;		/* verbose level */
 
 /*------------------------------------------------------------------------*/
 
-static FILE * split_input;
 static FILE * stats_file;
 static FILE * interpolant;
 static FILE * bintrace;
@@ -2162,6 +2161,7 @@ resolve_and_split (Clause ** clause)
 #endif
 
   assert (!count_resolvent);
+  assert (!count_stack);
 
   assert ((*clause)->antecedents);
   p = (*clause)->antecedents;
@@ -2306,8 +2306,6 @@ resolve_and_split (Clause ** clause)
   if (count_resolvent == 0)
     empty_cls_idx = (*clause)->idx;
 
-  if(!(*clause)->labels)
-    printf("clause idx: %d\n", (*clause)->idx);
   /* The final resolvent should be equal to the clause.  We check it by two
    * subsume tests, which, if one of them fails, gives a little bit more
    * information to the user.
@@ -2368,6 +2366,11 @@ POST_PROCESS_RESOLVED_CHAIN:
 #ifndef NDEBUG
   (*clause)->resolved = 1;
 #endif
+
+  // TODO: leaking here?
+  // we have to delete the stack if we haven't used it to copy the antecedents
+  // from it
+  count_stack = 0;
 
   return 1;
 }
@@ -3014,6 +3017,7 @@ check (void)
   if (!order ())
     return 0;
 
+  // TODO use booleforce memory wrapper for aigs, to track mem usage
   mgr = simpaig_init ();
 
   init_literals ();
@@ -3313,6 +3317,7 @@ SKIP:
 "  -R <proof>        generate extended binary resolution proof in RES format\n" \
 "  -i <interpolant>  generate Craig interpolant from hyper resolution proof\n" \
 "  --split <clidx>   Clauses 0..clidx in A, rest in B\n" \
+"  --seed <int>      Random seed for reproducibility\n" \
 "  -s <stats>        generate statistics\n" \
 "  -c <cnf>          specify original CNF for '-r' and '-R'\n" \
 "  -o <output>       set output file (for verbose and error output)\n" \
@@ -3427,7 +3432,7 @@ tracecheck_main (int argc, char **argv)
     {
       if (++i == argc)
         res = option_error ("argument to '--split' missing");
-      else if (interpolant)
+      else if (partition_split)
         res = option_error ("multiple '--split' options");
       else
         partition_split = atoi (argv[i]);
