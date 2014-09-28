@@ -117,8 +117,9 @@ struct Clause
   int newidx;			/* "<0"=original, ">0"=derived */
   int mark;			/* graph traversal */
   simpaig *itp; /* partial interpolant */
-  unsigned lineno: 29;			/* where the definition started */
+  unsigned lineno: 28;			/* where the definition started */
   unsigned partition : 3;
+  unsigned unnecessarily_split: 1;
 #ifndef NDEBUG
   unsigned resolved:1;		/* 1 iff already resolved */
 #endif
@@ -255,7 +256,13 @@ static int num_original_literals;
 static int num_derived_clauses;
 static int num_derived_literals;
 
+static int num_splits;
+static int num_derived_clauses_after;
+static int num_merge_literals;
+static int num_merge_literals_after;
+
 static int partition_split;
+static int seed;
 
 static simpaigmgr *mgr;
 static simpaig *final_itp;
@@ -287,8 +294,6 @@ DeclareIntStack (stack);
 DeclareIntStack (roots);
 DeclareIntStack (trail);
 DeclareIntStack (labels);
-DeclareIntStack (before_split);
-DeclareIntStack (after_split);
 
 /*------------------------------------------------------------------------*/
 
@@ -301,6 +306,8 @@ static int num_resolutions;	/* number resolution steps */
 static int num_antecedents;
 static int max_antecedents;
 static int num_empty_clauses;
+
+static int num_antecedents_after;
 
 /*------------------------------------------------------------------------*/
 
@@ -353,8 +360,6 @@ DefineIntStackFunctions(resolvent)
 DefineIntStackFunctions(roots)
 DefineIntStackFunctions(trail);
 DefineIntStackFunctions(labels);
-DefineIntStackFunctions(before_split);
-DefineIntStackFunctions(after_split);
 /* *INDENT-ON* */
 /*------------------------------------------------------------------------*/
 
@@ -1061,6 +1066,7 @@ INVALID_FORMAT_ERROR:
 rand_lim(int limit) {
   /* return a random number between 0 and limit inclusive.
    */
+  srand(seed);
 
   int divisor = RAND_MAX/(limit+1);
   int retval;
@@ -1785,17 +1791,33 @@ collect_literals (Clause * clause)
         label = antecedent->labels[q - antecedent->literals];
 
 
-      if (literals[lit].mark == 1)
+      // Note: label for pivots doesn't matter at this point
+      // It is determined in resolve_and_split later.
+      // We only compute labels for literals in resolvent
+      // marks encoded in LSBs: xyz:
+      //   x ... merge literal
+      //   y ... appears in both phases
+      //   z ... appears in one phase
+      // y and z are mutually exclusive
+      // x is only set if y or z are set
+      if (literals[lit].mark & 1)
+      {
+        literals[lit].mark |= 4;
         literals[lit].label |= label;
+      }
       else if (literals[lit].mark == 0)
       {
         literals[lit].mark = 1;
         literals[lit].label = label;
       }
+      else if (literals[lit].mark & 2)
+        literals[lit].mark |= 4;
 
-      // label doesn't matter anymore as soon as lit gets resolved
       if (literals[-lit].mark)
-        literals[lit].mark = literals[-lit].mark = 2;
+      {
+        literals[lit].mark = (literals[lit].mark & 4) | 2;
+        literals[-lit].mark = (literals[-lit].mark & 4) | 2;
+      }
 
       if (original_cnf_file_name && abs (lit) > original_variables)
         return check_error ("literal %d too large", lit);
@@ -1811,11 +1833,14 @@ collect_literals (Clause * clause)
   for (p = stack; p < stack + count_stack; p++)
   {
     lit = *p;
-    if (literals[lit].mark == 1)
+    if (literals[lit].mark & 1)
     {
       *q++ = lit;
       push_labels(literals[lit].label);
     }
+    if (literals[lit].mark & 4)
+      num_merge_literals++;
+
     // if lit appears more than once with mark == 1 in stack before this loop:
     // as mark is reset, rest is ignored
 
@@ -1833,6 +1858,75 @@ collect_literals (Clause * clause)
 
   return 1;
 }
+
+
+  static int
+merge_literals_count (Clause * clause)
+{
+  int idx, * p, * q, lit;
+  Clause * antecedent;
+
+  // Note: Collect literals for all internal vertices, no matter if literal list
+  // supplied or not
+  if (!clause->antecedents/*clause->literals*/)
+    return 1;
+
+  assert (clause->antecedents);		/* should be checked by parser */
+
+  for (p = clause->antecedents; (idx = *p); p++)
+  {
+    antecedent = idx2clause (idx);
+
+    assert (antecedent);
+    assert (antecedent->literals);
+
+    for (q = antecedent->literals; (lit = *q); q++)
+    {
+      // Note: label for pivots doesn't matter at this point
+      // It is determined in resolve_and_split later.
+      // We only compute labels for literals in resolvent
+      // marks encoded in LSBs: xyz:
+      //   x ... merge literal
+      //   y ... appears in both phases
+      //   z ... appears in one phase
+      // y and z are mutually exclusive
+      // x is only set if y or z are set
+      if (literals[lit].mark & 1)
+        literals[lit].mark |= 4;
+      else if (literals[lit].mark == 0)
+        literals[lit].mark = 1;
+      else if (literals[lit].mark & 2)
+        literals[lit].mark |= 4;
+
+      if (literals[-lit].mark)
+      {
+        literals[lit].mark = (literals[lit].mark & 4) | 2;
+        literals[-lit].mark = (literals[-lit].mark & 4) | 2;
+      }
+
+      push_stack (lit);
+    }
+  }
+
+  /* Shrink stack by literals in both phases, keep those occurring only in
+   * one phase.
+   */
+  for (p = stack; p < stack + count_stack; p++)
+  {
+    if (literals[lit].mark & 4)
+      num_merge_literals_after++;
+
+    // if lit appears more than once with mark == 1 in stack before this loop:
+    // as mark is reset, rest is ignored
+
+    literals[lit].mark = 0;
+    literals[lit].label = UNDEF;
+  }
+  count_stack = 0;
+
+  return 1;
+}
+
 
 /*------------------------------------------------------------------------*/
 /* Return the first literal that occurs already negated in the resolvent.
@@ -1922,6 +2016,7 @@ add_to_resolvent_except (Clause * clause, int idx)
     /* skip literals already part of resolvent
      */
     if (literals[other].mark) {
+      //TODO merge of lit here
       literals[other].label |= clause->labels[p - clause->literals];
       continue;
     }
@@ -2145,7 +2240,7 @@ check_prestine_chain (Clause * clause)
   static int
 resolve_and_split (Clause ** clause)
 {
-  int *p, idx, iterations, len, count, prev, i, lit;
+  int *p, idx, iterations, count, prev, i, lit, len;
   short pivlab;
   Clause *antecedent;
 #ifndef NDEBUG
@@ -2203,6 +2298,7 @@ resolve_and_split (Clause ** clause)
    */
   iterations = 0;
   pivlab = UNDEF;
+  num_splits = 0;
   while ((idx = *p++))
   {
 #ifdef BOOLEFORCE_LOG
@@ -2223,11 +2319,12 @@ resolve_and_split (Clause ** clause)
     // Note: careful with lit/idx
     if (pivlab != UNDEF && pivlab != literals[-lit].label)
     {
-      // TODO: can this loop be handled better?
+      // NEW SPLIT
+      num_splits++;
+
       for (i = 0; i < count_resolvent; i++)
         push_labels(literals[resolvent[i]].label);
-      //printf("NEW SPLIT %d -> %d\n", pivlab, literals[-lit].label);
-      // NEW SPLIT
+
       // create intermediate clause
       int *tmp_res = copy_ints(resolvent, count_resolvent);
       int *tmp_ants = copy_stack();
@@ -2469,7 +2566,8 @@ compute_itp (Clause * clause)
     simpaig_dec(mgr, clause->itp);
     clause->itp = tmp;
   }
-  push_after_split(iterations);
+  num_derived_clauses_after++;
+  num_antecedents_after += iterations;
 
   unmark_resolvent (clause);
 
@@ -2681,7 +2779,6 @@ linearize (Clause * clause)
 
   if (!clause->antecedents)
     return 1;
-  push_before_split(length_ints(clause->antecedents));
 
 #ifdef BOOLEFORCE_LOG
   if (verbose > 1)
@@ -3054,6 +3151,9 @@ check (void)
   if (!forall_clauses (compute_itp, "interpolation"))
     return 0;
 
+  if (!forall_clauses (merge_literals_count, "merge_literals_count"))
+    return 0;
+
 /*
   // This isn't working, probably due to aigs not being simplified?
 #ifndef NDEBUG
@@ -3077,22 +3177,23 @@ check (void)
   static void
 print_stats (void)
 {
-  int i;
-  if(count_before_split)
-  {
-    fprintf (stats_file, "%s;%d", input_name, before_split[0]);
-    for (i = 1; i < count_before_split; i++)
-      fprintf (stats_file, ";%d", before_split[i]);
-    fprintf (stats_file, "\n");
-  }
+  float mem_usage;
+  double avg, seconds;
+  avg = 0.0f;
+  fprintf (stats_file, "%s;%d;%d", input_name, partition_split, seed);
 
-  if(count_after_split)
-  {
-    fprintf (stats_file, "%s;%d", input_name, after_split[0]);
-    for (i = 1; i < count_after_split; i++)
-      fprintf (stats_file, ";%d", after_split[i]);
-    fprintf (stats_file, "\n");
-  }
+  avg = AVG(num_antecedents, num_derived_clauses);
+  fprintf (stats_file, ";%d;%.2f;%d", num_derived_clauses, avg, num_merge_literals);
+
+  fprintf (stats_file, ";%d", num_splits);
+
+  avg = AVG(num_antecedents_after, num_derived_clauses_after);
+  fprintf (stats_file, ";%d;%.2f;%d", num_derived_clauses_after, avg, num_merge_literals_after);
+
+  seconds = booleforce_time_stamp () - entered_time;
+  mem_usage = (float) booleforce_max_bytes() / (double) (1 << 20);
+  fprintf (stats_file, ";%.2f;%.2f\n", seconds, mem_usage);
+
 }
 
 /*------------------------------------------------------------------------*/
@@ -3140,8 +3241,6 @@ release (void)
   release_roots ();
   release_resolvent ();
   release_labels ();
-  release_before_split ();
-  release_after_split ();
 
   if (literals)
     release_literals ();
@@ -3196,7 +3295,7 @@ reset (void)
 
   if (stats_file)
   {
-    fclose (stats_file);
+    booleforce_close_file (stats_file);
     stats_file = 0;
   }
 
@@ -3228,9 +3327,6 @@ clear_static_variables (void)
 init (void)
 {
   double tmp = booleforce_time_stamp ();
-
-  int seed = time(NULL);
-  srand(seed);
 
   if (static_variables_are_dirty)
     clear_static_variables ();
@@ -3437,6 +3533,15 @@ tracecheck_main (int argc, char **argv)
       else
         partition_split = atoi (argv[i]);
     }
+    else if (!strcmp (argv[i], "--seed"))
+    {
+      if (++i == argc)
+        res = option_error ("argument to '--seed' missing");
+      else if (seed)
+        res = option_error ("multiple '--seed' options");
+      else
+        seed = atoi (argv[i]);
+    }
     else if (!strcmp (argv[i], "-s"))
     {
       if (++i == argc)
@@ -3445,7 +3550,7 @@ tracecheck_main (int argc, char **argv)
         res = option_error ("multiple '-s' options");
       else
       {
-        file = fopen (argv[i], "a");
+        file = booleforce_open_file_for_writing (argv[i]);
         if (file)
           stats_file = file;
         else
