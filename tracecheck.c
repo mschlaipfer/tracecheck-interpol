@@ -269,6 +269,8 @@ static simpaigmgr *mgr;
 static simpaig *final_itp;
 static simpaig **aigs;
 static aiger *output_aig;
+static simpaig **intermediates;
+static int intermediates_count;
 
 
 static int gates;
@@ -2536,68 +2538,111 @@ round_up_to_next_power_of_two (int v)
   v++;
   return v;
 }
+  static simpaig*
+build_conjunction_rec1 (int level)
+{
+  simpaig *c1,*c2;
+  if(level == 0)
+  {
+    if (intermediates_count > 0)
+      return intermediates[--intermediates_count];
+    else
+      return simpaig_true(mgr);
+  }
+
+  c1 = build_conjunction_rec1 (level >> 1);
+  c2 = build_conjunction_rec1 (level >> 1);
+
+  return simpaig_and(mgr, c1, c2);
+}
+
+  static simpaig*
+build_disjunction_rec1 (int level)
+{
+  simpaig *c1,*c2;
+  if(level == 0)
+  {
+    if (intermediates_count > 0)
+      return intermediates[--intermediates_count];
+    else
+      return simpaig_false(mgr);
+  }
+
+  c1 = build_disjunction_rec1 (level >> 1);
+  c2 = build_disjunction_rec1 (level >> 1);
+
+  return simpaig_or(mgr, c1, c2);
+}
+
+  static simpaig*
+build_conjunction_rec (int level)
+{
+  simpaig *c1,*c2;
+  if(level == 0)
+  {
+    if (count_trail > 0)
+      return literals[pop_trail()].aig;
+    else
+      return simpaig_true(mgr);
+  }
+
+  c1 = build_conjunction_rec (level >> 1);
+  c2 = build_conjunction_rec (level >> 1);
+
+  return simpaig_and(mgr, c1, c2);
+}
+
+  static simpaig*
+build_disjunction_rec (int level)
+{
+  simpaig *c1,*c2;
+  if(level == 0)
+  {
+    if (count_trail > 0)
+      return literals[pop_trail()].aig;
+    else
+      return simpaig_false(mgr);
+  }
+
+  c1 = build_disjunction_rec (level >> 1);
+  c2 = build_disjunction_rec (level >> 1);
+
+  return simpaig_or(mgr, c1, c2);
+}
 
   static simpaig *
 compute_m (Clause * clause)
 {
-  int *p, idx, lit1, lit2, flag, largest_branch;
-  simpaig * m, * tmp;
-
-  m = simpaig_false (mgr);
+  int *p, idx, input_count;
 
   for (p = clause->literals; (idx = *p); p++)
   {
     if (!literals[idx].mark)
-    {
-      // create aigs on demand
-      /*if (!literals[idx].aig) {
-        literals[idx].aig = simpaig_var (mgr, literals + idx, 0);
-        literals[idx].idx = idx;
-        literals[-idx].aig = simpaig_not (literals[idx].aig);
-        literals[-idx].idx = idx;
-      }*/
       push_trail(idx);
-      //tmp = simpaig_or (mgr, m, literals[idx].aig);
-      gates++;
-      //simpaig_dec(mgr, m);
-      m = tmp;
-      flag=1;
-    }
   }
 
-  largest_branch = round_up_to_next_power_of_two(count_trail);
-  largest_branch >>= 1;
-
-  while(largest_branch > 0)
-  {
-  for (p = trail; p < trail + largest_branch; p += 2)
-  {
-    lit1 = *p;
-    lit2 = *(p+1);
-
-    // if lit appears more than once with mark == 1 in stack before this loop:
-    // as mark is reset, rest is ignored
-
-    literals[lit].mark = 0;
-    literals[lit].label = UNDEF;
-  }
-  count_stack = 0;
-  }
-
-  if(flag)
-    gates--;
-  return m;
+  input_count = round_up_to_next_power_of_two(count_trail);
+  gates += (count_trail-1);
+  return build_disjunction_rec(input_count);
 }
 
   static int
 compute_itp (Clause * clause)
 {
-  int *p, idx, iterations;
+  int *p, idx, iterations, len, input_count;
   Clause *antecedent;
-  simpaig *m, *intermediate_itp, *tmp;
+  simpaig *m, **tmp;
 
   if (!clause->antecedents)
     return 1;
+
+  len = length_ints(clause->antecedents);
+  tmp = malloc(len * sizeof(intermediates[0]));
+  if(tmp != NULL)
+  {
+    intermediates = tmp;
+    intermediates_count = len;
+  }
 
   assert (clause->antecedents);
   p = clause->antecedents;
@@ -2607,7 +2652,6 @@ compute_itp (Clause * clause)
   iterations = 0;
   while ((idx = *p++))
   {
-    iterations++;
     antecedent = idx2clause (idx);
     assert (antecedent);
     assert (antecedent->itp);
@@ -2616,45 +2660,42 @@ compute_itp (Clause * clause)
       m = compute_m (antecedent);
       // conjunction of I_i \vee M_i
       if(itp_system_strength == 1) {
-        intermediate_itp = simpaig_or (mgr, antecedent->itp, m);
+        intermediates[iterations] = simpaig_or (mgr, antecedent->itp, m);
         gates++;
-        simpaig_dec(mgr, m);
-        tmp = simpaig_and (mgr, clause->itp, intermediate_itp);
-        gates++;
-        simpaig_dec(mgr, intermediate_itp);
       }
       else
       {
-        // TODO support for 2nd approach: i.e. disjunction of I_i \wedge \neg{M_i}
-        intermediate_itp = simpaig_and(mgr, antecedent->itp, simpaig_not(m));
+        intermediates[iterations] = simpaig_and(mgr, antecedent->itp, simpaig_not(m));
         gates++;
-        simpaig_dec(mgr, m);
-        tmp = simpaig_or(mgr, clause->itp, intermediate_itp);
-        gates++;
-        simpaig_dec(mgr, intermediate_itp);
       }
     }
     else if (clause->partition == A)
     {
-      tmp = simpaig_or (mgr, clause->itp, antecedent->itp);
-      gates++;
+      intermediates[iterations] = antecedent->itp;
     }
     else if (clause->partition == B)
     {
-      tmp = simpaig_and (mgr, clause->itp, antecedent->itp);
-      gates++;
+      intermediates[iterations] = antecedent->itp;
     }
     else
       return check_error ("chain pivots have to be labelled A, B, or AB");
 
-    simpaig_dec(mgr, clause->itp);
-    clause->itp = tmp;
+    iterations++;
   }
-  gates--;
+  gates += (len-1);
+  input_count = round_up_to_next_power_of_two(len);
+  if (clause->partition == A ||
+       (clause->partition == AB && itp_system_strength == 2))
+    clause->itp = build_disjunction_rec1(input_count);
+  else
+    clause->itp = build_conjunction_rec1(input_count);
+
   num_derived_clauses_after++;
   num_antecedents_after += iterations;
 
   unmark_resolvent (clause);
+
+  free(intermediates);
 
   return 1;
 }
