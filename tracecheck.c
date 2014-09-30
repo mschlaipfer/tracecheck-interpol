@@ -119,7 +119,7 @@ struct Clause
   simpaig *itp; /* partial interpolant */
   unsigned lineno: 28;			/* where the definition started */
   unsigned partition : 3;
-  unsigned unnecessarily_split: 1;
+  unsigned split: 1;
 #ifndef NDEBUG
   unsigned resolved:1;		/* 1 iff already resolved */
 #endif
@@ -204,6 +204,7 @@ static int previous_char;	/* implements ungetc */
 static FILE *output;
 static int close_output;
 static int verbose;		/* verbose level */
+static int itp_system_strength;
 
 /*------------------------------------------------------------------------*/
 
@@ -253,11 +254,11 @@ static int max_original_idx;
 static int num_original_clauses;
 static int num_original_literals;
 
+static int num_derived_init;
 static int num_derived_clauses;
 static int num_derived_literals;
 
 static int num_splits;
-static int num_derived_clauses_after;
 static int num_merge_literals;
 static int num_merge_literals_after;
 
@@ -268,6 +269,9 @@ static simpaigmgr *mgr;
 static simpaig *final_itp;
 static simpaig **aigs;
 static aiger *output_aig;
+
+static int gates;
+static int ands;
 
 /*
 #ifndef NDEBUG
@@ -307,6 +311,11 @@ static int num_antecedents;
 static int max_antecedents;
 static int num_empty_clauses;
 
+static int init_max_cls_idx;
+static int num_split_clauses;
+static int num_derived_clauses_init;
+static int num_antecedents_init;
+static int num_derived_clauses_after;
 static int num_antecedents_after;
 
 /*------------------------------------------------------------------------*/
@@ -470,6 +479,7 @@ length_ints (int *a)
 
 /*------------------------------------------------------------------------*/
 
+// TODO: num_derived not correct as it is used with splits as well
   inline static Clause *
 add_clause (int idx, int *literals, int *antecedents, int lineno)
 {
@@ -1859,6 +1869,17 @@ collect_literals (Clause * clause)
   return 1;
 }
 
+  static int
+split_clauses_count (Clause * clause)
+{
+  if (!clause->antecedents)
+    return 1;
+
+  if (clause->split && clause->idx <= max_cls_idx)
+    num_split_clauses++;
+
+  return 1;
+}
 
   static int
 merge_literals_count (Clause * clause)
@@ -1913,6 +1934,7 @@ merge_literals_count (Clause * clause)
    */
   for (p = stack; p < stack + count_stack; p++)
   {
+    lit = *p;
     if (literals[lit].mark & 4)
       num_merge_literals_after++;
 
@@ -2247,6 +2269,7 @@ resolve_and_split (Clause ** clause)
   int *q, idx2;
 #endif
 
+  pivlab = UNDEF;
   if (!(*clause)->antecedents)
     goto POST_PROCESS_RESOLVED_CHAIN;
 
@@ -2297,8 +2320,6 @@ resolve_and_split (Clause ** clause)
    * the current resolvent to obtain the next intermediate resolvent.
    */
   iterations = 0;
-  pivlab = UNDEF;
-  num_splits = 0;
   while ((idx = *p++))
   {
 #ifdef BOOLEFORCE_LOG
@@ -2321,6 +2342,7 @@ resolve_and_split (Clause ** clause)
     {
       // NEW SPLIT
       num_splits++;
+      (*clause)->split = 1;
 
       for (i = 0; i < count_resolvent; i++)
         push_labels(literals[resolvent[i]].label);
@@ -2455,8 +2477,11 @@ POST_PROCESS_RESOLVED_CHAIN:
     else if (pivlab == B)
       (*clause)->itp = simpaig_true (mgr);
     else if (pivlab == AB) {
-      (*clause)->itp = simpaig_true (mgr);
       // TODO support for 2nd approach: i.e. disjunction of I_i \wedge \neg{M_i}
+      if(itp_system_strength == 1)
+        (*clause)->itp = simpaig_true (mgr);
+      else
+        (*clause)->itp = simpaig_false (mgr);
     }
   }
 
@@ -2517,6 +2542,7 @@ compute_m (Clause * clause)
         literals[-idx].idx = idx;
       }*/
       tmp = simpaig_or (mgr, m, literals[idx].aig);
+      gates++;
       simpaig_dec(mgr, m);
       m = tmp;
     }
@@ -2550,16 +2576,35 @@ compute_itp (Clause * clause)
     {
       m = compute_m (antecedent);
       // conjunction of I_i \vee M_i
-      intermediate_itp = simpaig_or (mgr, antecedent->itp, m);
-      simpaig_dec(mgr, m);
-      tmp = simpaig_and (mgr, clause->itp, intermediate_itp);
-      simpaig_dec(mgr, intermediate_itp);
-      // TODO support for 2nd approach: i.e. disjunction of I_i \wedge \neg{M_i}
+      if(itp_system_strength == 1) {
+        intermediate_itp = simpaig_or (mgr, antecedent->itp, m);
+        gates++;
+        simpaig_dec(mgr, m);
+        tmp = simpaig_and (mgr, clause->itp, intermediate_itp);
+        gates++;
+        simpaig_dec(mgr, intermediate_itp);
+      }
+      else
+      {
+        // TODO support for 2nd approach: i.e. disjunction of I_i \wedge \neg{M_i}
+        intermediate_itp = simpaig_and(mgr, antecedent->itp, simpaig_not(m));
+        gates++;
+        simpaig_dec(mgr, m);
+        tmp = simpaig_or(mgr, clause->itp, intermediate_itp);
+        gates++;
+        simpaig_dec(mgr, intermediate_itp);
+      }
     }
     else if (clause->partition == A)
+    {
       tmp = simpaig_or (mgr, clause->itp, antecedent->itp);
+      gates++;
+    }
     else if (clause->partition == B)
+    {
       tmp = simpaig_and (mgr, clause->itp, antecedent->itp);
+      gates++;
+    }
     else
       return check_error ("chain pivots have to be labelled A, B, or AB");
 
@@ -3024,6 +3069,7 @@ copyaig (simpaig * aig)
   aigs[idx] = aig;
   if (simpaig_isand (aig))
   {
+    ands++;
     c0 = simpaig_child (aig, 0);
     c1 = simpaig_child (aig, 1);
     copyaig (c0);
@@ -3145,6 +3191,9 @@ check (void)
   if (rpttrace)
     write_rpt_header ();
 
+  num_derived_clauses_init = num_derived_clauses;
+  num_antecedents_init = num_antecedents;
+  init_max_cls_idx = max_cls_idx;
   if (!forall_clauses_manipulate (resolve_and_split, "resolution"))
     return 0;
 
@@ -3152,6 +3201,9 @@ check (void)
     return 0;
 
   if (!forall_clauses (merge_literals_count, "merge_literals_count"))
+    return 0;
+
+  if (!forall_clauses (split_clauses_count, "split_clauses_count"))
     return 0;
 
 /*
@@ -3180,20 +3232,19 @@ print_stats (void)
   float mem_usage;
   double avg, seconds;
   avg = 0.0f;
-  fprintf (stats_file, "%s;%d;%d", input_name, partition_split, seed);
+  fprintf (stats_file, "%s;%d;%d;%d", input_name, partition_split, seed, itp_system_strength);
 
-  avg = AVG(num_antecedents, num_derived_clauses);
-  fprintf (stats_file, ";%d;%.2f;%d", num_derived_clauses, avg, num_merge_literals);
+  avg = AVG(num_antecedents_init, num_derived_clauses_init);
+  fprintf (stats_file, ";%d;%.2f;%d", num_derived_clauses_init, avg, num_merge_literals);
 
-  fprintf (stats_file, ";%d", num_splits);
+  fprintf (stats_file, ";%d;%d", num_splits, num_split_clauses);
 
   avg = AVG(num_antecedents_after, num_derived_clauses_after);
-  fprintf (stats_file, ";%d;%.2f;%d", num_derived_clauses_after, avg, num_merge_literals_after);
+  fprintf (stats_file, ";%d;%.2f;%d;%d;%d", num_derived_clauses_after, avg, num_merge_literals_after, gates, ands);
 
   seconds = booleforce_time_stamp () - entered_time;
   mem_usage = (float) booleforce_max_bytes() / (double) (1 << 20);
   fprintf (stats_file, ";%.2f;%.2f\n", seconds, mem_usage);
-
 }
 
 /*------------------------------------------------------------------------*/
@@ -3411,7 +3462,7 @@ SKIP:
 "  -B <proof>        generate extended binary resolution trace\n" \
 "  -r <proof>        generate compact binary resolution trace in RPT format\n" \
 "  -R <proof>        generate extended binary resolution proof in RES format\n" \
-"  -i <interpolant>  generate Craig interpolant from hyper resolution proof\n" \
+"  -i <interpolant> <strength>  generate Craig interpolant from hyper resolution proof\n" \
 "  --split <clidx>   Clauses 0..clidx in A, rest in B\n" \
 "  --seed <int>      Random seed for reproducibility\n" \
 "  -s <stats>        generate statistics\n" \
@@ -3522,6 +3573,10 @@ tracecheck_main (int argc, char **argv)
           interpolant = file;
         else
           res = option_error ("can not write to '%s'", argv[i]);
+
+        itp_system_strength = atoi (argv[++i]);
+        if(itp_system_strength < 1 || itp_system_strength > 2)
+          res = option_error ("itp system strength must be 1 or 2");
       }
     }
     else if (!strcmp (argv[i], "--split"))
@@ -3722,7 +3777,7 @@ tracecheck_main (int argc, char **argv)
           final_itp = clauses[empty_cls_idx]->itp;
           expand (final_itp);
           if (interpolant)
-            aiger_write_to_file (output_aig, aiger_ascii_mode, interpolant);
+            aiger_write_to_file (output_aig, aiger_binary_mode, interpolant);
           simpaig_dec (mgr, final_itp);
           aiger_reset (output_aig);
 
