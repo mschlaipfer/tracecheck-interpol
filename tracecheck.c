@@ -270,11 +270,14 @@ static simpaig *final_itp;
 static simpaig **aigs;
 static aiger *output_aig;
 
+
 static int gates;
 static int ands;
 
 /*
 #ifndef NDEBUG
+static aiger *sanity_aig;
+static simpaig **sanity_aigs;
 static simpaig *partition_a;
 static simpaig *partition_b;
 #endif
@@ -2521,11 +2524,23 @@ unmark_resolvent (Clause * clause)
   }
 }
 
+  static int
+round_up_to_next_power_of_two (int v)
+{
+  v--;
+  v |= v >> 1;
+  v |= v >> 2;
+  v |= v >> 4;
+  v |= v >> 8;
+  v |= v >> 16;
+  v++;
+  return v;
+}
 
   static simpaig *
 compute_m (Clause * clause)
 {
-  int *p, idx;
+  int *p, idx, lit1, lit2, flag, largest_branch;
   simpaig * m, * tmp;
 
   m = simpaig_false (mgr);
@@ -2541,12 +2556,36 @@ compute_m (Clause * clause)
         literals[-idx].aig = simpaig_not (literals[idx].aig);
         literals[-idx].idx = idx;
       }*/
-      tmp = simpaig_or (mgr, m, literals[idx].aig);
+      push_trail(idx);
+      //tmp = simpaig_or (mgr, m, literals[idx].aig);
       gates++;
-      simpaig_dec(mgr, m);
+      //simpaig_dec(mgr, m);
       m = tmp;
+      flag=1;
     }
   }
+
+  largest_branch = round_up_to_next_power_of_two(count_trail);
+  largest_branch >>= 1;
+
+  while(largest_branch > 0)
+  {
+  for (p = trail; p < trail + largest_branch; p += 2)
+  {
+    lit1 = *p;
+    lit2 = *(p+1);
+
+    // if lit appears more than once with mark == 1 in stack before this loop:
+    // as mark is reset, rest is ignored
+
+    literals[lit].mark = 0;
+    literals[lit].label = UNDEF;
+  }
+  count_stack = 0;
+  }
+
+  if(flag)
+    gates--;
   return m;
 }
 
@@ -2611,6 +2650,7 @@ compute_itp (Clause * clause)
     simpaig_dec(mgr, clause->itp);
     clause->itp = tmp;
   }
+  gates--;
   num_derived_clauses_after++;
   num_antecedents_after += iterations;
 
@@ -3102,21 +3142,72 @@ expand (simpaig * aig)
   free (outbuffer);
 }
 
-/*------------------------------------------------------------------------*/
 /*
 #ifndef NDEBUG
+  static void
+sanity_copyaig (simpaig * aig)
+{
+  Literal *aig_input;
+  simpaig *c0, *c1;
+  const char *name;
+  unsigned idx;
+
+  assert (aig);
+
+  aig = simpaig_strip (aig);
+  idx = simpaig_index (aig);
+  //printf("!idx: %d\n", !idx);
+  //printf("aigs[idx]: %d\n", aigs[idx]);
+  if (!idx || sanity_aigs[idx])
+    return;
+
+  sanity_aigs[idx] = aig;
+  if (simpaig_isand (aig))
+  {
+    c0 = simpaig_child (aig, 0);
+    c1 = simpaig_child (aig, 1);
+    sanity_copyaig (c0);
+    sanity_copyaig (c1);
+    aiger_add_and (sanity_aig,
+        2 * idx, // lhs
+        simpaig_unsigned_index (c0), // rhs1
+        simpaig_unsigned_index (c1)); // rhs2
+  }
+  else
+  {
+    name = 0;
+    aig_input = simpaig_isvar (aig);
+    name = next_symbol (aig_input->idx);
+    aiger_add_input (sanity_aig, 2 * idx, name);
+  }
+}
+
+    static void
+sanity_expand (simpaig * aig)
+{
+  unsigned maxvar;
+  simpaig_assign_indices (mgr, aig);
+  maxvar = simpaig_max_index (mgr);
+  sanity_aigs = calloc (maxvar + 1, sizeof aigs[0]);
+  sanity_copyaig (aig);
+  aiger_add_output (sanity_aig, simpaig_unsigned_index (aig), 0);
+  free (sanity_aigs);
+  simpaig_reset_indices (mgr);
+  free (outbuffer);
+}
 
   static simpaig *
 compute_cl (Clause * clause)
 {
   int *p, idx;
-  simpaig * cl;
+  simpaig * cl, * tmp;
 
   cl = simpaig_false (mgr);
 
   for (p = clause->literals; (idx = *p); p++)
   {
-    cl = simpaig_or (mgr, cl, literals[idx].aig);
+    tmp = simpaig_or (mgr, cl, literals[idx].aig);
+    cl = tmp;
   }
 
   return cl;
@@ -3125,16 +3216,22 @@ compute_cl (Clause * clause)
   static int
 compute_partition_aigs (Clause * clause)
 {
-  simpaig * cl;
+  simpaig * cl, * tmp;
 
   if (clause->antecedents)
     return 1;
 
   cl = compute_cl (clause);
   if (clause->partition == A)
-    partition_a = simpaig_and (mgr, partition_a, cl);
+  {
+    tmp = simpaig_and (mgr, partition_a, cl);
+    partition_a = tmp;
+  }
   else if (clause->partition == B)
-    partition_b = simpaig_and (mgr, partition_b, cl);
+  {
+    tmp = simpaig_and (mgr, partition_b, cl);
+    partition_b = tmp;
+  }
   else
     return check_error("Initial vertices either in A or B");
   
@@ -3206,18 +3303,22 @@ check (void)
   if (!forall_clauses (split_clauses_count, "split_clauses_count"))
     return 0;
 
+
 /*
-  // This isn't working, probably due to aigs not being simplified?
 #ifndef NDEBUG
   partition_a = simpaig_true (mgr);
   partition_b = simpaig_true (mgr);
   forall_clauses (compute_partition_aigs, "partition aigs");
 
   final_itp = clauses[empty_cls_idx]->itp;
+  sanity_expand(simpaig_and(mgr, partition_a, simpaig_not(final_itp)));
+  printf("b\n");
+  FILE *file = booleforce_open_file_for_writing ("sanity.aig");
+  aiger_write_to_file (sanity_aig, aiger_binary_mode, file);
+  printf("c\n");
   //assert (simpaig_isfalse (simpaig_and (mgr, partition_a, partition_b)));
 
   //assert (simpaig_istrue (simpaig_implies (mgr, partition_a, final_itp)));
-  assert (simpaig_istrue (simpaig_implies (mgr, final_itp, partition_b)));
 #endif
 */
 
