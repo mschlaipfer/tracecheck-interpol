@@ -1844,6 +1844,7 @@ collect_literals (Clause * clause)
   /* Shrink stack by literals in both phases, keep those occurring only in
    * one phase.
    */
+
   q = stack;
   for (p = stack; p < stack + count_stack; p++)
   {
@@ -2370,6 +2371,8 @@ resolve_and_split (Clause ** clause)
       (*clause)->antecedents = tmp;
 
       intermediate->next_in_order = *clause;
+      if(*clause == first_in_order)
+        first_in_order = intermediate;
 #ifndef NDEBUG
       (*clause)->resolved = 1;
 #endif
@@ -2452,6 +2455,9 @@ resolve_and_split (Clause ** clause)
 
   count_resolvent = 0;
 
+  if((*clause)->antecedents)
+    (*clause)->partition = pivlab;
+
 POST_PROCESS_RESOLVED_CHAIN:
 
 #ifdef BOOLEFORCE_LOG
@@ -2470,13 +2476,14 @@ POST_PROCESS_RESOLVED_CHAIN:
     if (ebintrace)
       print_clause (*clause, 1, ebintrace);
 
-  } else 
-  {
+  }
+  /*{
     // init partial interpolants based on computation necessary for itp
     // computation
     // for disjunction of intermediate interpolants init with false, otherwise
     // with true
     (*clause)->partition = pivlab;
+    printf("%d %d\n", (*clause)->idx, (*clause)->partition);
     if (pivlab == A)
       (*clause)->itp = simpaig_false (mgr);
     else if (pivlab == B)
@@ -2487,8 +2494,7 @@ POST_PROCESS_RESOLVED_CHAIN:
         (*clause)->itp = simpaig_true (mgr);
       else
         (*clause)->itp = simpaig_false (mgr);
-    }
-  }
+  }*/
 
 #ifndef NDEBUG
   (*clause)->resolved = 1;
@@ -2509,7 +2515,7 @@ mark_resolvent (Clause * clause)
 
   for (p = clause->literals; (idx = *p); p++)
   {
-    assert(literals[idx].mark == 0);
+    //assert(literals[idx].mark == 0);
     literals[idx].mark = 1;
   }
 }
@@ -2614,17 +2620,167 @@ build_disjunction_rec (int level)
 compute_m (Clause * clause)
 {
   int *p, idx, input_count;
+  assert(count_trail == 0);
 
   for (p = clause->literals; (idx = *p); p++)
   {
     if (!literals[idx].mark)
+    {
       push_trail(idx);
+      literals[idx].mark = 2;
+    }
+  }
+  for (p = clause->literals; (idx = *p); p++)
+  {
+    if(literals[idx].mark == 2)
+      literals[idx].mark = 0;
   }
 
   input_count = round_up_to_next_power_of_two(count_trail);
   gates += (count_trail-1);
   return build_disjunction_rec(input_count);
 }
+
+  static const char *
+next_symbol (unsigned idx)
+{
+  unsigned len;
+
+  len = 20;
+  len += 30;
+
+  if (size_outbuffer < len)
+  {
+    if (size_outbuffer)
+    {
+      while (size_outbuffer < len)
+        size_outbuffer *= 2;
+
+      outbuffer = realloc (outbuffer, size_outbuffer);
+    }
+    else
+      outbuffer = malloc (size_outbuffer = len);
+  }
+
+  sprintf (outbuffer, "x%u", idx);
+
+  return outbuffer;
+}
+#ifndef NDEBUG
+  static void
+sanity_copyaig (simpaig * aig)
+{
+  Literal *aig_input;
+  simpaig *c0, *c1;
+  const char *name;
+  unsigned idx;
+
+  assert (aig);
+
+  aig = simpaig_strip (aig);
+  idx = simpaig_index (aig);
+  //printf("!idx: %d\n", !idx);
+  //printf("aigs[idx]: %d\n", aigs[idx]);
+  if (!idx || sanity_aigs[idx])
+    return;
+
+  sanity_aigs[idx] = aig;
+  if (simpaig_isand (aig))
+  {
+    c0 = simpaig_child (aig, 0);
+    c1 = simpaig_child (aig, 1);
+    sanity_copyaig (c0);
+    sanity_copyaig (c1);
+    aiger_add_and (sanity_aig,
+        2 * idx, // lhs
+        simpaig_unsigned_index (c0), // rhs1
+        simpaig_unsigned_index (c1)); // rhs2
+  }
+  else
+  {
+    name = 0;
+    aig_input = simpaig_isvar (aig);
+    name = next_symbol (aig_input->idx);
+    aiger_add_input (sanity_aig, 2 * idx, name);
+  }
+}
+
+    static void
+sanity_expand (simpaig * aig)
+{
+  unsigned maxvar;
+  simpaig_assign_indices (mgr, aig);
+  maxvar = simpaig_max_index (mgr);
+  sanity_aigs = calloc (maxvar + 1, sizeof aigs[0]);
+  sanity_copyaig (aig);
+  aiger_add_output (sanity_aig, simpaig_unsigned_index (aig), 0);
+  free (sanity_aigs);
+  simpaig_reset_indices (mgr);
+}
+
+  static simpaig *
+compute_cl (Clause * clause)
+{
+  int *p, idx;
+  simpaig * cl, * tmp;
+
+  cl = simpaig_false (mgr);
+
+  for (p = clause->literals; (idx = *p); p++)
+  {
+    tmp = simpaig_or (mgr, cl, literals[idx].aig);
+    cl = tmp;
+  }
+
+  return cl;
+}
+
+  static int
+compute_partition_aigs (Clause * clause)
+{
+  simpaig * cl, * tmp;
+
+  if (clause->antecedents)
+    return 1;
+
+  cl = compute_cl (clause);
+  if (clause->partition == A)
+  {
+    tmp = simpaig_and (mgr, partition_a, cl);
+    partition_a = tmp;
+  }
+  else if (clause->partition == B)
+  {
+    tmp = simpaig_and (mgr, partition_b, cl);
+    partition_b = tmp;
+  }
+  else
+    return check_error("Initial vertices either in A or B");
+  
+  return 1;
+}
+
+  static simpaig*
+compute_upward_projection (Clause * clause, short label)
+{
+  int *p, idx;
+  simpaig * cl, * tmp;
+
+  cl = simpaig_false (mgr);
+
+  for (p = clause->literals; (idx = *p); p++)
+  {
+    if ((label & literals[idx].partition) != 0)
+    {
+      tmp = simpaig_or (mgr, cl, literals[idx].aig);
+      cl = tmp;
+    }
+  }
+  return cl;
+}
+
+#endif
+
 
   static int
 compute_itp (Clause * clause)
@@ -2647,8 +2803,6 @@ compute_itp (Clause * clause)
   assert (clause->antecedents);
   p = clause->antecedents;
 
-  mark_resolvent (clause);
-
   iterations = 0;
   while ((idx = *p++))
   {
@@ -2657,9 +2811,11 @@ compute_itp (Clause * clause)
     assert (antecedent->itp);
     if (clause->partition == AB)
     {
+      mark_resolvent (clause);
       m = compute_m (antecedent);
       // conjunction of I_i \vee M_i
-      if(itp_system_strength == 1) {
+      if(itp_system_strength == 1)
+      {
         intermediates[iterations] = simpaig_or (mgr, antecedent->itp, m);
         gates++;
       }
@@ -2668,6 +2824,7 @@ compute_itp (Clause * clause)
         intermediates[iterations] = simpaig_and(mgr, antecedent->itp, simpaig_not(m));
         gates++;
       }
+      unmark_resolvent (clause);
     }
     else if (clause->partition == A)
     {
@@ -2682,23 +2839,217 @@ compute_itp (Clause * clause)
 
     iterations++;
   }
-  gates += (len-1);
   input_count = round_up_to_next_power_of_two(len);
-  if (clause->partition == A ||
+
+  if (clause->partition == B ||
+       (clause->partition == AB && itp_system_strength == 1))
+    clause->itp = build_conjunction_rec1(input_count);
+  else if (clause->partition == A ||
        (clause->partition == AB && itp_system_strength == 2))
     clause->itp = build_disjunction_rec1(input_count);
   else
-    clause->itp = build_conjunction_rec1(input_count);
+    return check_error ("that itp system does not exist.");
 
+  num_derived_clauses_after++;
+  num_antecedents_after += iterations;
+  gates += (len-1);
+
+  free(intermediates);
+
+#ifndef NDEBUG
+  // Note: remove to check invariant for all chains
+  if(clause->idx != empty_cls_idx)
+    return 1;
+
+  simpaig *sanity_tmp;
+  int sat_result;
+  FILE *file; 
+  int *q, lit;
+
+  sanity_aig = aiger_init ();
+
+  sanity_tmp = simpaig_and(mgr, partition_a, simpaig_not(clause->itp));
+  sanity_expand(simpaig_and(mgr, sanity_tmp, simpaig_not(compute_upward_projection(clause, A))));
+  file = booleforce_open_file_for_writing ("sanity.aig");
+  aiger_write_to_file (sanity_aig, aiger_binary_mode, file);
+  booleforce_close_file (file);
+  aiger_reset (sanity_aig);
+  system("~/tools/aiger-1.9.4/aigtocnf sanity.aig > sanity.cnf");
+  sat_result = system("~/tools/picosat-959/picosat -n sanity.cnf > /dev/null"); 
+  if(sat_result >> 8 != 20)
+  {
+    printf("clause %d: %d %d\n", clause->idx, clause->partition, iterations);
+    p = clause->literals;
+    while ((idx = *p))
+    {
+      printf("%d: %d, ", idx, clause->labels[p - clause->literals]);
+      p++;
+    }
+    printf("\n");
+
+    p = clause->antecedents;
+    iterations = 0;
+    while ((idx = *p++))
+    {
+      antecedent = idx2clause (idx);
+      assert (antecedent);
+      assert (antecedent->itp);
+
+      q = antecedent->literals;
+      printf("antecedent %d\n", idx);
+      while ((lit = *q))
+      {
+        printf("%d: %d, ", lit, antecedent->labels[q - antecedent->literals]);
+        q++;
+      }
+      printf("\n");
+    }
+   
+    return check_error("violated itp invariants in clause %d\n", clause->idx);
+  }
+
+  sanity_aig = aiger_init ();
+  sanity_tmp = simpaig_and(mgr, partition_b, clause->itp);
+  sanity_expand(simpaig_and(mgr, sanity_tmp, simpaig_not(compute_upward_projection(clause, B))));
+  file = booleforce_open_file_for_writing ("sanity.aig");
+  aiger_write_to_file (sanity_aig, aiger_binary_mode, file);
+  booleforce_close_file (file);
+  aiger_reset (sanity_aig);
+  system("~/tools/aiger-1.9.4/aigtocnf sanity.aig > sanity.cnf");
+  sat_result = system("~/tools/picosat-959/picosat -n sanity.cnf > /dev/null"); 
+  if(sat_result >> 8 != 20)
+  {
+    printf("clause %d: %d %d\n", clause->idx, clause->partition, iterations);
+    p = clause->literals;
+    while ((idx = *p))
+    {
+      printf("%d: %d, ", idx, clause->labels[p - clause->literals]);
+      p++;
+    }
+    printf("\n");
+
+    p = clause->antecedents;
+    iterations = 0;
+    while ((idx = *p++))
+    {
+      antecedent = idx2clause (idx);
+      assert (antecedent);
+      assert (antecedent->itp);
+
+      q = antecedent->literals;
+      printf("antecedent %d\n", idx);
+      while ((lit = *q))
+      {
+        printf("%d: %d, ", lit, antecedent->labels[q - antecedent->literals]);
+        q++;
+      }
+      printf("\n");
+    }
+    
+
+    return check_error("violated itp invariants in clause %d\n", clause->idx);
+  }
+
+  //assert (simpaig_isfalse (simpaig_and (mgr, partition_a, partition_b)));
+
+  //assert (simpaig_istrue (simpaig_implies (mgr, partition_a, final_itp)));
+#endif
+
+
+  return 1;
+}
+/*
+  static simpaig *
+compute_m (Clause * clause)
+{
+  int *p, idx;
+  simpaig * m, * tmp;
+
+  m = simpaig_false (mgr);
+
+  for (p = clause->literals; (idx = *p); p++)
+  {
+    if (!literals[idx].mark)
+    {
+      tmp = simpaig_or (mgr, m, literals[idx].aig);
+      gates++;
+      simpaig_dec(mgr, m);
+      m = tmp;
+    }
+  }
+  return m;
+}
+
+  static int
+compute_itp (Clause * clause)
+{
+  int *p, idx, iterations;
+  Clause *antecedent;
+  simpaig *m, *intermediate_itp, *tmp;
+
+  if (!clause->antecedents)
+    return 1;
+
+  assert (clause->antecedents);
+  p = clause->antecedents;
+
+  mark_resolvent (clause);
+
+  iterations = 0;
+  while ((idx = *p++))
+  {
+    iterations++;
+    antecedent = idx2clause (idx);
+    assert (antecedent);
+    assert (antecedent->itp);
+    if (clause->partition == AB)
+    {
+      m = compute_m (antecedent);
+      // conjunction of I_i \vee M_i
+      if(itp_system_strength == 1) {
+        intermediate_itp = simpaig_or (mgr, antecedent->itp, m);
+        gates++;
+        simpaig_dec(mgr, m);
+        tmp = simpaig_and (mgr, clause->itp, intermediate_itp);
+        gates++;
+        simpaig_dec(mgr, intermediate_itp);
+      }
+      else
+      {
+        // TODO support for 2nd approach: i.e. disjunction of I_i \wedge \neg{M_i}
+        intermediate_itp = simpaig_and(mgr, antecedent->itp, simpaig_not(m));
+        gates++;
+        simpaig_dec(mgr, m);
+        tmp = simpaig_or(mgr, clause->itp, intermediate_itp);
+        gates++;
+        simpaig_dec(mgr, intermediate_itp);
+      }
+    }
+    else if (clause->partition == A)
+    {
+      tmp = simpaig_or (mgr, clause->itp, antecedent->itp);
+      gates++;
+    }
+    else if (clause->partition == B)
+    {
+      tmp = simpaig_and (mgr, clause->itp, antecedent->itp);
+      gates++;
+    }
+    else
+      return check_error ("chain pivots have to be labelled A, B, or AB");
+
+    simpaig_dec(mgr, clause->itp);
+    clause->itp = tmp;
+  }
   num_derived_clauses_after++;
   num_antecedents_after += iterations;
 
   unmark_resolvent (clause);
 
-  free(intermediates);
-
   return 1;
 }
+*/
+
 
 /*------------------------------------------------------------------------*/
 
@@ -2795,7 +3146,7 @@ untrail (void)
   inline static int
 visit (Clause * clause)
 {
-  int *p, *q, false_literal_pos, idx0, idx1, tmp0, tmp1, idx, tmp;
+  int *p, *q, false_literal_pos, idx0, idx1, tmp0, tmp1, idx, label, tmp;
 
   p = clause->literals;
 
@@ -2828,8 +3179,13 @@ visit (Clause * clause)
     tmp = deref (idx);
     if (tmp != FALSE)
     {
+      label = clause->labels[q - clause->literals];
+
       *q = p[false_literal_pos];
       p[false_literal_pos] = idx;
+      
+      clause->labels[q - clause->literals] = clause->labels[false_literal_pos];
+      clause->labels[false_literal_pos] = label;
 
       CONS (literals[idx].clauses, clause);
 
@@ -3104,31 +3460,6 @@ generate_new_indices (void)
 /* expand, copyaig, next_symbol taken from aigunroll.c to copy simpaig data
  * structure into aiger data structure, which allows to print the AIG.
  */
-  static const char *
-next_symbol (unsigned idx)
-{
-  unsigned len;
-
-  len = 20;
-  len += 30;
-
-  if (size_outbuffer < len)
-  {
-    if (size_outbuffer)
-    {
-      while (size_outbuffer < len)
-        size_outbuffer *= 2;
-
-      outbuffer = realloc (outbuffer, size_outbuffer);
-    }
-    else
-      outbuffer = malloc (size_outbuffer = len);
-  }
-
-  sprintf (outbuffer, "x%u", idx);
-
-  return outbuffer;
-}
 
   static void
 copyaig (simpaig * aig)
@@ -3184,103 +3515,6 @@ expand (simpaig * aig)
 }
 
 
-#ifndef NDEBUG
-  static void
-sanity_copyaig (simpaig * aig)
-{
-  Literal *aig_input;
-  simpaig *c0, *c1;
-  const char *name;
-  unsigned idx;
-
-  assert (aig);
-
-  aig = simpaig_strip (aig);
-  idx = simpaig_index (aig);
-  //printf("!idx: %d\n", !idx);
-  //printf("aigs[idx]: %d\n", aigs[idx]);
-  if (!idx || sanity_aigs[idx])
-    return;
-
-  sanity_aigs[idx] = aig;
-  if (simpaig_isand (aig))
-  {
-    c0 = simpaig_child (aig, 0);
-    c1 = simpaig_child (aig, 1);
-    sanity_copyaig (c0);
-    sanity_copyaig (c1);
-    aiger_add_and (sanity_aig,
-        2 * idx, // lhs
-        simpaig_unsigned_index (c0), // rhs1
-        simpaig_unsigned_index (c1)); // rhs2
-  }
-  else
-  {
-    name = 0;
-    aig_input = simpaig_isvar (aig);
-    name = next_symbol (aig_input->idx);
-    aiger_add_input (sanity_aig, 2 * idx, name);
-  }
-}
-
-    static void
-sanity_expand (simpaig * aig)
-{
-  unsigned maxvar;
-  simpaig_assign_indices (mgr, aig);
-  maxvar = simpaig_max_index (mgr);
-  sanity_aigs = calloc (maxvar + 1, sizeof aigs[0]);
-  sanity_copyaig (aig);
-  aiger_add_output (sanity_aig, simpaig_unsigned_index (aig), 0);
-  free (sanity_aigs);
-  simpaig_reset_indices (mgr);
-  free (outbuffer);
-}
-
-  static simpaig *
-compute_cl (Clause * clause)
-{
-  int *p, idx;
-  simpaig * cl, * tmp;
-
-  cl = simpaig_false (mgr);
-
-  for (p = clause->literals; (idx = *p); p++)
-  {
-    tmp = simpaig_or (mgr, cl, literals[idx].aig);
-    cl = tmp;
-  }
-
-  return cl;
-}
-
-  static int
-compute_partition_aigs (Clause * clause)
-{
-  simpaig * cl, * tmp;
-
-  if (clause->antecedents)
-    return 1;
-
-  cl = compute_cl (clause);
-  if (clause->partition == A)
-  {
-    tmp = simpaig_and (mgr, partition_a, cl);
-    partition_a = tmp;
-  }
-  else if (clause->partition == B)
-  {
-    tmp = simpaig_and (mgr, partition_b, cl);
-    partition_b = tmp;
-  }
-  else
-    return check_error("Initial vertices either in A or B");
-  
-  return 1;
-}
-
-#endif
-
 /*------------------------------------------------------------------------*/
 
   static int
@@ -3334,6 +3568,12 @@ check (void)
   if (!forall_clauses_manipulate (resolve_and_split, "resolution"))
     return 0;
 
+#ifndef NDEBUG
+  partition_a = simpaig_true (mgr);
+  partition_b = simpaig_true (mgr);
+  forall_clauses (compute_partition_aigs, "partition aigs");
+#endif
+
   if (!forall_clauses (compute_itp, "interpolation"))
     return 0;
 
@@ -3344,22 +3584,6 @@ check (void)
     return 0;
 
 
-#ifndef NDEBUG
-  partition_a = simpaig_true (mgr);
-  partition_b = simpaig_true (mgr);
-  forall_clauses (compute_partition_aigs, "partition aigs");
-
-  sanity_aig = aiger_init ();
-  final_itp = clauses[empty_cls_idx]->itp;
-  sanity_expand(simpaig_and(mgr, partition_b, final_itp));
-  FILE *file = booleforce_open_file_for_writing ("sanity.aig");
-  aiger_write_to_file (sanity_aig, aiger_binary_mode, file);
-  booleforce_close_file (file);
-  aiger_reset (sanity_aig);
-  //assert (simpaig_isfalse (simpaig_and (mgr, partition_a, partition_b)));
-
-  //assert (simpaig_istrue (simpaig_implies (mgr, partition_a, final_itp)));
-#endif
 
   return 1;
 }
@@ -3913,7 +4137,6 @@ tracecheck_main (int argc, char **argv)
       {
         if (check ())
         {
-          /*
           output_aig = aiger_init ();
           final_itp = clauses[empty_cls_idx]->itp;
           expand (final_itp);
@@ -3921,7 +4144,6 @@ tracecheck_main (int argc, char **argv)
             aiger_write_to_file (output_aig, aiger_binary_mode, interpolant);
           simpaig_dec (mgr, final_itp);
           aiger_reset (output_aig);
-          */
 
           if (stats_file)
             print_stats ();
