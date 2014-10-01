@@ -276,14 +276,14 @@ static int intermediates_count;
 static int gates;
 static int ands;
 
-/*
+
 #ifndef NDEBUG
 static aiger *sanity_aig;
 static simpaig **sanity_aigs;
 static simpaig *partition_a;
 static simpaig *partition_b;
 #endif
-*/
+
 
 static char *outbuffer;
 static unsigned size_outbuffer;
@@ -3183,7 +3183,7 @@ expand (simpaig * aig)
   free (outbuffer);
 }
 
-/*
+
 #ifndef NDEBUG
   static void
 sanity_copyaig (simpaig * aig)
@@ -3280,7 +3280,6 @@ compute_partition_aigs (Clause * clause)
 }
 
 #endif
-*/
 
 /*------------------------------------------------------------------------*/
 
@@ -3345,23 +3344,22 @@ check (void)
     return 0;
 
 
-/*
 #ifndef NDEBUG
   partition_a = simpaig_true (mgr);
   partition_b = simpaig_true (mgr);
   forall_clauses (compute_partition_aigs, "partition aigs");
 
+  sanity_aig = aiger_init ();
   final_itp = clauses[empty_cls_idx]->itp;
-  sanity_expand(simpaig_and(mgr, partition_a, simpaig_not(final_itp)));
-  printf("b\n");
+  sanity_expand(simpaig_and(mgr, partition_b, final_itp));
   FILE *file = booleforce_open_file_for_writing ("sanity.aig");
   aiger_write_to_file (sanity_aig, aiger_binary_mode, file);
-  printf("c\n");
+  booleforce_close_file (file);
+  aiger_reset (sanity_aig);
   //assert (simpaig_isfalse (simpaig_and (mgr, partition_a, partition_b)));
 
   //assert (simpaig_istrue (simpaig_implies (mgr, partition_a, final_itp)));
 #endif
-*/
 
   return 1;
 }
@@ -3915,6 +3913,7 @@ tracecheck_main (int argc, char **argv)
       {
         if (check ())
         {
+          /*
           output_aig = aiger_init ();
           final_itp = clauses[empty_cls_idx]->itp;
           expand (final_itp);
@@ -3922,6 +3921,7 @@ tracecheck_main (int argc, char **argv)
             aiger_write_to_file (output_aig, aiger_binary_mode, interpolant);
           simpaig_dec (mgr, final_itp);
           aiger_reset (output_aig);
+          */
 
           if (stats_file)
             print_stats ();
