@@ -394,7 +394,7 @@ build_circuit_rec_ ## name (int level, \
   simpaig* base) \
 { \
   simpaig *c1, *c2; \
-  if (level == 0) \
+  if (level == 1) \
   { \
     if (count_circuit_components_ ## name > 0) \
       return circuit_components_ ## name[--count_circuit_components_ ## name]; \
@@ -2548,9 +2548,11 @@ compute_m (Clause * clause)
   if(tmp != NULL)
   {
     circuit_components_m = tmp;
-    count_circuit_components_m = len;
+    // TODO len isn't the actual number of components
+    //    count_circuit_components_m = len;
   }
 
+  iterations = 0;
   for (p = clause->literals; (idx = *p); p++)
   {
     if (!literals[idx].mark)
@@ -2569,8 +2571,10 @@ compute_m (Clause * clause)
   }
 
   input_count = round_up_to_next_power_of_two(iterations);
+  count_circuit_components_m = iterations;
   gates += (iterations-1);
   ret_val = build_circuit_rec_m(input_count, simpaig_or, simpaig_false (mgr));
+  assert(count_circuit_components_m == 0);
   free(circuit_components_m);
   return ret_val;
 }
@@ -2605,7 +2609,7 @@ next_symbol (unsigned idx)
 }
 
   static void
-copyaig (simpaig * aig, simpaig **aigs, aiger *output_aig)
+copyaig (simpaig * aig)
 {
   Literal *aig_input;
   simpaig *c0, *c1;
@@ -2625,8 +2629,8 @@ copyaig (simpaig * aig, simpaig **aigs, aiger *output_aig)
     ands++;
     c0 = simpaig_child (aig, 0);
     c1 = simpaig_child (aig, 1);
-    copyaig (c0, aigs, output_aig);
-    copyaig (c1, aigs, output_aig);
+    copyaig (c0);
+    copyaig (c1);
     aiger_add_and (output_aig,
         2 * idx, // lhs
         simpaig_unsigned_index (c0), // rhs1
@@ -2642,13 +2646,13 @@ copyaig (simpaig * aig, simpaig **aigs, aiger *output_aig)
 }
 
   static void
-expand (simpaig * aig, simpaig **aigs, aiger *output_aig)
+expand (simpaig * aig)
 {
   unsigned maxvar;
   simpaig_assign_indices (mgr, aig);
   maxvar = simpaig_max_index (mgr);
   aigs = calloc (maxvar + 1, sizeof aigs[0]);
-  copyaig (aig, aigs, output_aig);
+  copyaig (aig);
   aiger_add_output (output_aig, simpaig_unsigned_index (aig), 0);
   free (aigs);
   simpaig_reset_indices (mgr);
@@ -2727,7 +2731,7 @@ check_interpolation_invariant (simpaig *invariant)
 
   output_aig = aiger_init ();
 
-  expand(invariant, aigs, output_aig);
+  expand (invariant);
   file = booleforce_open_file_for_writing ("sanity.aig");
   aiger_write_to_file (output_aig, aiger_binary_mode, file);
   booleforce_close_file (file);
@@ -2814,12 +2818,13 @@ compute_itp (Clause * clause)
   num_antecedents_after += iterations;
   gates += (len-1);
 
+  assert(count_circuit_components_itp == 0);
   free(circuit_components_itp);
 
 #ifndef NDEBUG
   // Note: remove to check invariant for all chains, 
-  if(clause->idx != empty_cls_idx)
-    return 1;
+  //if(clause->idx != empty_cls_idx)
+    //return 1;
 
   simpaig *sanity_tmp, *invariant;
 
@@ -2832,6 +2837,8 @@ compute_itp (Clause * clause)
   invariant = simpaig_and(mgr, sanity_tmp, simpaig_not(compute_upward_projection(clause, B)));
   if (!check_interpolation_invariant(invariant))
     return check_error("violated itp invariant in clause %d\n", clause->idx);
+
+  printf("OKAY: partial interpolant @ clause %d\n", clause->idx); 
 
 #endif
 
@@ -3852,7 +3859,7 @@ tracecheck_main (int argc, char **argv)
         {
           output_aig = aiger_init ();
           final_itp = clauses[empty_cls_idx]->itp;
-          expand (final_itp, aigs, output_aig);
+          expand (final_itp);
           if (interpolant)
             aiger_write_to_file (output_aig, aiger_binary_mode, interpolant);
           simpaig_dec (mgr, final_itp);
