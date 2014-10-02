@@ -79,6 +79,13 @@ static int size_ ## name; \
 static int count_ ## name
 
 /*------------------------------------------------------------------------*/
+/* Macro for declaring an aig component storage. The corresponding operations on
+ * the stack are defined by the macro 'DefineAIGStoreFunctions'.
+ */
+#define DeclareAIGComponentStorage(name) \
+  static simpaig ** name; \
+static int count_ ## name
+/*------------------------------------------------------------------------*/
 
 typedef struct Clause Clause;
 typedef struct Cell Cell;	/* list node */
@@ -263,23 +270,17 @@ static int num_merge_literals;
 static int num_merge_literals_after;
 
 static int partition_split;
-static int seed;
 
 static simpaigmgr *mgr;
 static simpaig *final_itp;
 static simpaig **aigs;
 static aiger *output_aig;
-static simpaig **intermediates;
-static int intermediates_count;
-
 
 static int gates;
 static int ands;
 
 
 #ifndef NDEBUG
-static aiger *sanity_aig;
-static simpaig **sanity_aigs;
 static simpaig *partition_a;
 static simpaig *partition_b;
 #endif
@@ -306,6 +307,11 @@ DeclareIntStack (labels);
 
 /*------------------------------------------------------------------------*/
 
+DeclareAIGComponentStorage (circuit_components_m);
+DeclareAIGComponentStorage (circuit_components_itp);
+
+/*------------------------------------------------------------------------*/
+
 static int conflict_occurred;
 
 /*------------------------------------------------------------------------*/
@@ -318,9 +324,9 @@ static int num_empty_clauses;
 
 static int init_max_cls_idx;
 static int num_split_clauses;
-static int num_derived_clauses_init;
-static int num_antecedents_init;
-static int num_derived_clauses_after;
+static int num_derived_clauses_before_split;
+static int num_antecedents_before_split;
+static int num_derived_clauses_after_split;
 static int num_antecedents_after;
 
 /*------------------------------------------------------------------------*/
@@ -376,6 +382,37 @@ DefineIntStackFunctions(trail);
 DefineIntStackFunctions(labels);
 /* *INDENT-ON* */
 /*------------------------------------------------------------------------*/
+
+/*------------------------------------------------------------------------*/
+/* Build circuit like a tree, so that it has less levels (maybe better for AIG
+ * reductions)
+ */
+#define DefineAIGStoreFunctions(name) \
+    static simpaig* \
+build_circuit_rec_ ## name (int level, \
+  simpaig* (*aig_connective) (simpaigmgr*, simpaig*, simpaig*), \
+  simpaig* base) \
+{ \
+  simpaig *c1, *c2; \
+  if (level == 0) \
+  { \
+    if (count_circuit_components_ ## name > 0) \
+      return circuit_components_ ## name[--count_circuit_components_ ## name]; \
+    else \
+      return base; \
+  } \
+  c1 = build_circuit_rec_ ## name (level >> 1, aig_connective, base); \
+  c2 = build_circuit_rec_ ## name (level >> 1, aig_connective, base); \
+  return aig_connective (mgr, c1, c2); \
+}
+
+/*------------------------------------------------------------------------*/
+/* *INDENT-OFF* */
+DefineAIGStoreFunctions(m);
+DefineAIGStoreFunctions(itp);
+/* *INDENT-ON* */
+/*------------------------------------------------------------------------*/
+
 
   static void
 LOG (const char *fmt, ...)
@@ -1077,24 +1114,6 @@ INVALID_FORMAT_ERROR:
 
 /*------------------------------------------------------------------------*/
 
-  int
-rand_lim(int limit) {
-  /* return a random number between 0 and limit inclusive.
-   */
-  srand(seed);
-
-  int divisor = RAND_MAX/(limit+1);
-  int retval;
-
-  do { 
-      retval = rand() / divisor;
-  } while (retval > limit);
-
-  return retval;
-}
-
-/*------------------------------------------------------------------------*/
-
   static int
 parse (void)
 {
@@ -1124,10 +1143,6 @@ parse (void)
   {
     assert (format == ASCII_FORMAT);
     res = parse_ascii ();
-
-    // 25% <- 50% -> 25%
-    if (!partition_split)
-      partition_split = rand_lim(num_original_clauses / 2) + num_original_clauses / 4 + 2;
   }
 
   if (res && verbose)
@@ -2377,7 +2392,8 @@ resolve_and_split (Clause ** clause)
       (*clause)->resolved = 1;
 #endif
       *clause = intermediate;
-      // TODO this here: literals[-lit].label = UNDEF; ???
+      // TODO this here:
+      // literals[-lit].label = UNDEF;
       break;
     }
     // else
@@ -2387,7 +2403,8 @@ resolve_and_split (Clause ** clause)
     push_stack(idx);
 
     pivlab = literals[-lit].label;
-    literals[-lit].label = UNDEF; // ???
+    // TODO right spot to reset label?
+    literals[-lit].label = UNDEF;
 
 #ifndef NDEBUG
     for (q = (*clause)->literals; (idx2 = *q); q++) {
@@ -2415,15 +2432,6 @@ resolve_and_split (Clause ** clause)
           count_resolvent, resolvent);
     prev = count++;
   }
-
-  /*
-  for (i = 0; i < count_resolvent; i++)
-  {
-    push_labels(literals[resolvent[i]].label);
-    printf ("%d [%d] ", resolvent[i], literals[resolvent[i]].label);
-  }
-  printf("\n");
-  */
 
 #ifdef BOOLEFORCE_LOG
   if (verbose > 1)
@@ -2477,24 +2485,6 @@ POST_PROCESS_RESOLVED_CHAIN:
       print_clause (*clause, 1, ebintrace);
 
   }
-  /*{
-    // init partial interpolants based on computation necessary for itp
-    // computation
-    // for disjunction of intermediate interpolants init with false, otherwise
-    // with true
-    (*clause)->partition = pivlab;
-    printf("%d %d\n", (*clause)->idx, (*clause)->partition);
-    if (pivlab == A)
-      (*clause)->itp = simpaig_false (mgr);
-    else if (pivlab == B)
-      (*clause)->itp = simpaig_true (mgr);
-    else if (pivlab == AB) {
-      // TODO support for 2nd approach: i.e. disjunction of I_i \wedge \neg{M_i}
-      if(itp_system_strength == 1)
-        (*clause)->itp = simpaig_true (mgr);
-      else
-        (*clause)->itp = simpaig_false (mgr);
-  }*/
 
 #ifndef NDEBUG
   (*clause)->resolved = 1;
@@ -2544,110 +2534,57 @@ round_up_to_next_power_of_two (int v)
   v++;
   return v;
 }
-  static simpaig*
-build_conjunction_rec1 (int level)
-{
-  simpaig *c1,*c2;
-  if(level == 0)
-  {
-    if (intermediates_count > 0)
-      return intermediates[--intermediates_count];
-    else
-      return simpaig_true(mgr);
-  }
 
-  c1 = build_conjunction_rec1 (level >> 1);
-  c2 = build_conjunction_rec1 (level >> 1);
-
-  return simpaig_and(mgr, c1, c2);
-}
-
-  static simpaig*
-build_disjunction_rec1 (int level)
-{
-  simpaig *c1,*c2;
-  if(level == 0)
-  {
-    if (intermediates_count > 0)
-      return intermediates[--intermediates_count];
-    else
-      return simpaig_false(mgr);
-  }
-
-  c1 = build_disjunction_rec1 (level >> 1);
-  c2 = build_disjunction_rec1 (level >> 1);
-
-  return simpaig_or(mgr, c1, c2);
-}
-
-  static simpaig*
-build_conjunction_rec (int level)
-{
-  simpaig *c1,*c2;
-  if(level == 0)
-  {
-    if (count_trail > 0)
-      return literals[pop_trail()].aig;
-    else
-      return simpaig_true(mgr);
-  }
-
-  c1 = build_conjunction_rec (level >> 1);
-  c2 = build_conjunction_rec (level >> 1);
-
-  return simpaig_and(mgr, c1, c2);
-}
-
-  static simpaig*
-build_disjunction_rec (int level)
-{
-  simpaig *c1,*c2;
-  if(level == 0)
-  {
-    if (count_trail > 0)
-      return literals[pop_trail()].aig;
-    else
-      return simpaig_false(mgr);
-  }
-
-  c1 = build_disjunction_rec (level >> 1);
-  c2 = build_disjunction_rec (level >> 1);
-
-  return simpaig_or(mgr, c1, c2);
-}
 
   static simpaig *
 compute_m (Clause * clause)
 {
-  int *p, idx, input_count;
-  assert(count_trail == 0);
+  int *p, idx, len, input_count, iterations;
+  simpaig **tmp, *ret_val;
+
+  len = length_ints (clause->literals);
+  // TODO use realloc and maybe booleforce mem managment
+  tmp = malloc(len * sizeof(circuit_components_m[0]));
+  if(tmp != NULL)
+  {
+    circuit_components_m = tmp;
+    count_circuit_components_m = len;
+  }
 
   for (p = clause->literals; (idx = *p); p++)
   {
     if (!literals[idx].mark)
     {
-      push_trail(idx);
+      circuit_components_m[iterations++] = literals[idx].aig;
+
+      // Set mark to 2, in order not to add lits twice
       literals[idx].mark = 2;
     }
   }
+  // Reset the literals just marked, so not to bleed into the context
   for (p = clause->literals; (idx = *p); p++)
   {
     if(literals[idx].mark == 2)
       literals[idx].mark = 0;
   }
 
-  input_count = round_up_to_next_power_of_two(count_trail);
-  gates += (count_trail-1);
-  return build_disjunction_rec(input_count);
+  input_count = round_up_to_next_power_of_two(iterations);
+  gates += (iterations-1);
+  ret_val = build_circuit_rec_m(input_count, simpaig_or, simpaig_false (mgr));
+  free(circuit_components_m);
+  return ret_val;
 }
 
+/*------------------------------------------------------------------------*/
+/* expand, copyaig, next_symbol taken from aigunroll.c to copy simpaig data
+ * structure into aiger data structure, which allows to print the AIG.
+ */
   static const char *
 next_symbol (unsigned idx)
 {
   unsigned len;
 
   len = 20;
-  len += 30;
 
   if (size_outbuffer < len)
   {
@@ -2666,9 +2603,9 @@ next_symbol (unsigned idx)
 
   return outbuffer;
 }
-#ifndef NDEBUG
+
   static void
-sanity_copyaig (simpaig * aig)
+copyaig (simpaig * aig, simpaig **aigs, aiger *output_aig)
 {
   Literal *aig_input;
   simpaig *c0, *c1;
@@ -2679,19 +2616,18 @@ sanity_copyaig (simpaig * aig)
 
   aig = simpaig_strip (aig);
   idx = simpaig_index (aig);
-  //printf("!idx: %d\n", !idx);
-  //printf("aigs[idx]: %d\n", aigs[idx]);
-  if (!idx || sanity_aigs[idx])
+  if (!idx || aigs[idx])
     return;
 
-  sanity_aigs[idx] = aig;
+  aigs[idx] = aig;
   if (simpaig_isand (aig))
   {
+    ands++;
     c0 = simpaig_child (aig, 0);
     c1 = simpaig_child (aig, 1);
-    sanity_copyaig (c0);
-    sanity_copyaig (c1);
-    aiger_add_and (sanity_aig,
+    copyaig (c0, aigs, output_aig);
+    copyaig (c1, aigs, output_aig);
+    aiger_add_and (output_aig,
         2 * idx, // lhs
         simpaig_unsigned_index (c0), // rhs1
         simpaig_unsigned_index (c1)); // rhs2
@@ -2701,22 +2637,26 @@ sanity_copyaig (simpaig * aig)
     name = 0;
     aig_input = simpaig_isvar (aig);
     name = next_symbol (aig_input->idx);
-    aiger_add_input (sanity_aig, 2 * idx, name);
+    aiger_add_input (output_aig, 2 * idx, name);
   }
 }
 
-    static void
-sanity_expand (simpaig * aig)
+  static void
+expand (simpaig * aig, simpaig **aigs, aiger *output_aig)
 {
   unsigned maxvar;
   simpaig_assign_indices (mgr, aig);
   maxvar = simpaig_max_index (mgr);
-  sanity_aigs = calloc (maxvar + 1, sizeof aigs[0]);
-  sanity_copyaig (aig);
-  aiger_add_output (sanity_aig, simpaig_unsigned_index (aig), 0);
-  free (sanity_aigs);
+  aigs = calloc (maxvar + 1, sizeof aigs[0]);
+  copyaig (aig, aigs, output_aig);
+  aiger_add_output (output_aig, simpaig_unsigned_index (aig), 0);
+  free (aigs);
   simpaig_reset_indices (mgr);
+  free (outbuffer);
 }
+
+
+#ifndef NDEBUG
 
   static simpaig *
 compute_cl (Clause * clause)
@@ -2779,6 +2719,28 @@ compute_upward_projection (Clause * clause, short label)
   return cl;
 }
 
+  static int
+check_interpolation_invariant (simpaig *invariant)
+{
+  int sat_result;
+  FILE *file; 
+
+  output_aig = aiger_init ();
+
+  expand(invariant, aigs, output_aig);
+  file = booleforce_open_file_for_writing ("sanity.aig");
+  aiger_write_to_file (output_aig, aiger_binary_mode, file);
+  booleforce_close_file (file);
+  aiger_reset (output_aig);
+  // TODO paths / system()
+  system("~/tools/aiger-1.9.4/aigtocnf sanity.aig > sanity.cnf");
+  sat_result = system("~/tools/picosat-959/picosat -n sanity.cnf > /dev/null"); 
+  // Note: return code 10 == sat, 20 == unsat
+  if(sat_result >> 8 != 20)
+    return 0;
+  return 1;
+}
+
 #endif
 
 
@@ -2793,11 +2755,13 @@ compute_itp (Clause * clause)
     return 1;
 
   len = length_ints(clause->antecedents);
-  tmp = malloc(len * sizeof(intermediates[0]));
+
+  // TODO use realloc and maybe booleforce mem managment
+  tmp = malloc(len * sizeof(circuit_components_itp[0]));
   if(tmp != NULL)
   {
-    intermediates = tmp;
-    intermediates_count = len;
+    circuit_components_itp = tmp;
+    count_circuit_components_itp = len;
   }
 
   assert (clause->antecedents);
@@ -2816,24 +2780,20 @@ compute_itp (Clause * clause)
       // conjunction of I_i \vee M_i
       if(itp_system_strength == 1)
       {
-        intermediates[iterations] = simpaig_or (mgr, antecedent->itp, m);
+        circuit_components_itp[iterations] = simpaig_or (mgr, antecedent->itp, m);
         gates++;
       }
       else
       {
-        intermediates[iterations] = simpaig_and(mgr, antecedent->itp, simpaig_not(m));
+        circuit_components_itp[iterations] = simpaig_and(mgr, antecedent->itp, simpaig_not(m));
         gates++;
       }
       unmark_resolvent (clause);
     }
     else if (clause->partition == A)
-    {
-      intermediates[iterations] = antecedent->itp;
-    }
+      circuit_components_itp[iterations] = antecedent->itp;
     else if (clause->partition == B)
-    {
-      intermediates[iterations] = antecedent->itp;
-    }
+      circuit_components_itp[iterations] = antecedent->itp;
     else
       return check_error ("chain pivots have to be labelled A, B, or AB");
 
@@ -2843,213 +2803,41 @@ compute_itp (Clause * clause)
 
   if (clause->partition == B ||
        (clause->partition == AB && itp_system_strength == 1))
-    clause->itp = build_conjunction_rec1(input_count);
+    clause->itp = build_circuit_rec_itp(input_count, simpaig_and, simpaig_true (mgr));
   else if (clause->partition == A ||
        (clause->partition == AB && itp_system_strength == 2))
-    clause->itp = build_disjunction_rec1(input_count);
+    clause->itp = build_circuit_rec_itp(input_count, simpaig_or, simpaig_false (mgr));
   else
     return check_error ("that itp system does not exist.");
 
-  num_derived_clauses_after++;
+  num_derived_clauses_after_split++;
   num_antecedents_after += iterations;
   gates += (len-1);
 
-  free(intermediates);
+  free(circuit_components_itp);
 
 #ifndef NDEBUG
-  // Note: remove to check invariant for all chains
+  // Note: remove to check invariant for all chains, 
   if(clause->idx != empty_cls_idx)
     return 1;
 
-  simpaig *sanity_tmp;
-  int sat_result;
-  FILE *file; 
-  int *q, lit;
-
-  sanity_aig = aiger_init ();
+  simpaig *sanity_tmp, *invariant;
 
   sanity_tmp = simpaig_and(mgr, partition_a, simpaig_not(clause->itp));
-  sanity_expand(simpaig_and(mgr, sanity_tmp, simpaig_not(compute_upward_projection(clause, A))));
-  file = booleforce_open_file_for_writing ("sanity.aig");
-  aiger_write_to_file (sanity_aig, aiger_binary_mode, file);
-  booleforce_close_file (file);
-  aiger_reset (sanity_aig);
-  system("~/tools/aiger-1.9.4/aigtocnf sanity.aig > sanity.cnf");
-  sat_result = system("~/tools/picosat-959/picosat -n sanity.cnf > /dev/null"); 
-  if(sat_result >> 8 != 20)
-  {
-    printf("clause %d: %d %d\n", clause->idx, clause->partition, iterations);
-    p = clause->literals;
-    while ((idx = *p))
-    {
-      printf("%d: %d, ", idx, clause->labels[p - clause->literals]);
-      p++;
-    }
-    printf("\n");
+  invariant = simpaig_and(mgr, sanity_tmp, simpaig_not(compute_upward_projection(clause, A)));
+  if (!check_interpolation_invariant(invariant))
+    return check_error("violated itp invariant in clause %d\n", clause->idx);
 
-    p = clause->antecedents;
-    iterations = 0;
-    while ((idx = *p++))
-    {
-      antecedent = idx2clause (idx);
-      assert (antecedent);
-      assert (antecedent->itp);
-
-      q = antecedent->literals;
-      printf("antecedent %d\n", idx);
-      while ((lit = *q))
-      {
-        printf("%d: %d, ", lit, antecedent->labels[q - antecedent->literals]);
-        q++;
-      }
-      printf("\n");
-    }
-   
-    return check_error("violated itp invariants in clause %d\n", clause->idx);
-  }
-
-  sanity_aig = aiger_init ();
   sanity_tmp = simpaig_and(mgr, partition_b, clause->itp);
-  sanity_expand(simpaig_and(mgr, sanity_tmp, simpaig_not(compute_upward_projection(clause, B))));
-  file = booleforce_open_file_for_writing ("sanity.aig");
-  aiger_write_to_file (sanity_aig, aiger_binary_mode, file);
-  booleforce_close_file (file);
-  aiger_reset (sanity_aig);
-  system("~/tools/aiger-1.9.4/aigtocnf sanity.aig > sanity.cnf");
-  sat_result = system("~/tools/picosat-959/picosat -n sanity.cnf > /dev/null"); 
-  if(sat_result >> 8 != 20)
-  {
-    printf("clause %d: %d %d\n", clause->idx, clause->partition, iterations);
-    p = clause->literals;
-    while ((idx = *p))
-    {
-      printf("%d: %d, ", idx, clause->labels[p - clause->literals]);
-      p++;
-    }
-    printf("\n");
+  invariant = simpaig_and(mgr, sanity_tmp, simpaig_not(compute_upward_projection(clause, B)));
+  if (!check_interpolation_invariant(invariant))
+    return check_error("violated itp invariant in clause %d\n", clause->idx);
 
-    p = clause->antecedents;
-    iterations = 0;
-    while ((idx = *p++))
-    {
-      antecedent = idx2clause (idx);
-      assert (antecedent);
-      assert (antecedent->itp);
-
-      q = antecedent->literals;
-      printf("antecedent %d\n", idx);
-      while ((lit = *q))
-      {
-        printf("%d: %d, ", lit, antecedent->labels[q - antecedent->literals]);
-        q++;
-      }
-      printf("\n");
-    }
-    
-
-    return check_error("violated itp invariants in clause %d\n", clause->idx);
-  }
-
-  //assert (simpaig_isfalse (simpaig_and (mgr, partition_a, partition_b)));
-
-  //assert (simpaig_istrue (simpaig_implies (mgr, partition_a, final_itp)));
 #endif
 
 
   return 1;
 }
-/*
-  static simpaig *
-compute_m (Clause * clause)
-{
-  int *p, idx;
-  simpaig * m, * tmp;
-
-  m = simpaig_false (mgr);
-
-  for (p = clause->literals; (idx = *p); p++)
-  {
-    if (!literals[idx].mark)
-    {
-      tmp = simpaig_or (mgr, m, literals[idx].aig);
-      gates++;
-      simpaig_dec(mgr, m);
-      m = tmp;
-    }
-  }
-  return m;
-}
-
-  static int
-compute_itp (Clause * clause)
-{
-  int *p, idx, iterations;
-  Clause *antecedent;
-  simpaig *m, *intermediate_itp, *tmp;
-
-  if (!clause->antecedents)
-    return 1;
-
-  assert (clause->antecedents);
-  p = clause->antecedents;
-
-  mark_resolvent (clause);
-
-  iterations = 0;
-  while ((idx = *p++))
-  {
-    iterations++;
-    antecedent = idx2clause (idx);
-    assert (antecedent);
-    assert (antecedent->itp);
-    if (clause->partition == AB)
-    {
-      m = compute_m (antecedent);
-      // conjunction of I_i \vee M_i
-      if(itp_system_strength == 1) {
-        intermediate_itp = simpaig_or (mgr, antecedent->itp, m);
-        gates++;
-        simpaig_dec(mgr, m);
-        tmp = simpaig_and (mgr, clause->itp, intermediate_itp);
-        gates++;
-        simpaig_dec(mgr, intermediate_itp);
-      }
-      else
-      {
-        // TODO support for 2nd approach: i.e. disjunction of I_i \wedge \neg{M_i}
-        intermediate_itp = simpaig_and(mgr, antecedent->itp, simpaig_not(m));
-        gates++;
-        simpaig_dec(mgr, m);
-        tmp = simpaig_or(mgr, clause->itp, intermediate_itp);
-        gates++;
-        simpaig_dec(mgr, intermediate_itp);
-      }
-    }
-    else if (clause->partition == A)
-    {
-      tmp = simpaig_or (mgr, clause->itp, antecedent->itp);
-      gates++;
-    }
-    else if (clause->partition == B)
-    {
-      tmp = simpaig_and (mgr, clause->itp, antecedent->itp);
-      gates++;
-    }
-    else
-      return check_error ("chain pivots have to be labelled A, B, or AB");
-
-    simpaig_dec(mgr, clause->itp);
-    clause->itp = tmp;
-  }
-  num_derived_clauses_after++;
-  num_antecedents_after += iterations;
-
-  unmark_resolvent (clause);
-
-  return 1;
-}
-*/
-
 
 /*------------------------------------------------------------------------*/
 
@@ -3457,65 +3245,6 @@ generate_new_indices (void)
 }
 
 /*------------------------------------------------------------------------*/
-/* expand, copyaig, next_symbol taken from aigunroll.c to copy simpaig data
- * structure into aiger data structure, which allows to print the AIG.
- */
-
-  static void
-copyaig (simpaig * aig)
-{
-  Literal *aig_input;
-  simpaig *c0, *c1;
-  const char *name;
-  unsigned idx;
-
-  assert (aig);
-
-  aig = simpaig_strip (aig);
-  idx = simpaig_index (aig);
-  //printf("!idx: %d\n", !idx);
-  //printf("aigs[idx]: %d\n", aigs[idx]);
-  if (!idx || aigs[idx])
-    return;
-
-  aigs[idx] = aig;
-  if (simpaig_isand (aig))
-  {
-    ands++;
-    c0 = simpaig_child (aig, 0);
-    c1 = simpaig_child (aig, 1);
-    copyaig (c0);
-    copyaig (c1);
-    aiger_add_and (output_aig,
-        2 * idx, // lhs
-        simpaig_unsigned_index (c0), // rhs1
-        simpaig_unsigned_index (c1)); // rhs2
-  }
-  else
-  {
-    name = 0;
-    aig_input = simpaig_isvar (aig);
-    name = next_symbol (aig_input->idx);
-    aiger_add_input (output_aig, 2 * idx, name);
-  }
-}
-
-  static void
-expand (simpaig * aig)
-{
-  unsigned maxvar;
-  simpaig_assign_indices (mgr, aig);
-  maxvar = simpaig_max_index (mgr);
-  aigs = calloc (maxvar + 1, sizeof aigs[0]);
-  copyaig (aig);
-  aiger_add_output (output_aig, simpaig_unsigned_index (aig), 0);
-  free (aigs);
-  simpaig_reset_indices (mgr);
-  free (outbuffer);
-}
-
-
-/*------------------------------------------------------------------------*/
 
   static int
 check (void)
@@ -3562,8 +3291,8 @@ check (void)
   if (rpttrace)
     write_rpt_header ();
 
-  num_derived_clauses_init = num_derived_clauses;
-  num_antecedents_init = num_antecedents;
+  num_derived_clauses_before_split = num_derived_clauses;
+  num_antecedents_before_split = num_antecedents;
   init_max_cls_idx = max_cls_idx;
   if (!forall_clauses_manipulate (resolve_and_split, "resolution"))
     return 0;
@@ -3596,15 +3325,15 @@ print_stats (void)
   float mem_usage;
   double avg, seconds;
   avg = 0.0f;
-  fprintf (stats_file, "%s;%d;%d;%d", input_name, partition_split, seed, itp_system_strength);
+  fprintf (stats_file, "%s;%d;%d", input_name, partition_split, itp_system_strength);
 
-  avg = AVG(num_antecedents_init, num_derived_clauses_init);
-  fprintf (stats_file, ";%d;%.2f;%d", num_derived_clauses_init, avg, num_merge_literals);
+  avg = AVG(num_antecedents_before_split, num_derived_clauses_before_split);
+  fprintf (stats_file, ";%d;%.2f;%d", num_derived_clauses_before_split, avg, num_merge_literals);
 
   fprintf (stats_file, ";%d;%d", num_splits, num_split_clauses);
 
-  avg = AVG(num_antecedents_after, num_derived_clauses_after);
-  fprintf (stats_file, ";%d;%.2f;%d;%d;%d", num_derived_clauses_after, avg, num_merge_literals_after, gates, ands);
+  avg = AVG(num_antecedents_after, num_derived_clauses_after_split);
+  fprintf (stats_file, ";%d;%.2f;%d;%d;%d", num_derived_clauses_after_split, avg, num_merge_literals_after, gates, ands);
 
   seconds = booleforce_time_stamp () - entered_time;
   mem_usage = (float) booleforce_max_bytes() / (double) (1 << 20);
@@ -3826,9 +3555,7 @@ SKIP:
 "  -B <proof>        generate extended binary resolution trace\n" \
 "  -r <proof>        generate compact binary resolution trace in RPT format\n" \
 "  -R <proof>        generate extended binary resolution proof in RES format\n" \
-"  -i <interpolant> <strength>  generate Craig interpolant from hyper resolution proof\n" \
-"  --split <clidx>   Clauses 0..clidx in A, rest in B\n" \
-"  --seed <int>      Random seed for reproducibility\n" \
+"  -i <interpolant> <split> <strength>  generate Craig interpolant from hyper resolution proof\n" \
 "  -s <stats>        generate statistics\n" \
 "  -c <cnf>          specify original CNF for '-r' and '-R'\n" \
 "  -o <output>       set output file (for verbose and error output)\n" \
@@ -3938,28 +3665,14 @@ tracecheck_main (int argc, char **argv)
         else
           res = option_error ("can not write to '%s'", argv[i]);
 
+        partition_split = atoi (argv[++i]);
+        if(partition_split < 0)
+          res = option_error ("invalid (A,B) split");
+
         itp_system_strength = atoi (argv[++i]);
         if(itp_system_strength < 1 || itp_system_strength > 2)
           res = option_error ("itp system strength must be 1 or 2");
       }
-    }
-    else if (!strcmp (argv[i], "--split"))
-    {
-      if (++i == argc)
-        res = option_error ("argument to '--split' missing");
-      else if (partition_split)
-        res = option_error ("multiple '--split' options");
-      else
-        partition_split = atoi (argv[i]);
-    }
-    else if (!strcmp (argv[i], "--seed"))
-    {
-      if (++i == argc)
-        res = option_error ("argument to '--seed' missing");
-      else if (seed)
-        res = option_error ("multiple '--seed' options");
-      else
-        seed = atoi (argv[i]);
     }
     else if (!strcmp (argv[i], "-s"))
     {
@@ -4139,7 +3852,7 @@ tracecheck_main (int argc, char **argv)
         {
           output_aig = aiger_init ();
           final_itp = clauses[empty_cls_idx]->itp;
-          expand (final_itp);
+          expand (final_itp, aigs, output_aig);
           if (interpolant)
             aiger_write_to_file (output_aig, aiger_binary_mode, interpolant);
           simpaig_dec (mgr, final_itp);
