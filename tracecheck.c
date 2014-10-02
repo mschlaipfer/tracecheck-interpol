@@ -2544,7 +2544,7 @@ compute_m (Clause * clause)
 
   len = length_ints (clause->literals);
   // TODO use realloc and maybe booleforce mem managment
-  tmp = malloc(len * sizeof(circuit_components_m[0]));
+  tmp = malloc(len * sizeof (circuit_components_m[0]));
   if(tmp != NULL)
   {
     circuit_components_m = tmp;
@@ -2570,12 +2570,12 @@ compute_m (Clause * clause)
       literals[idx].mark = 0;
   }
 
-  input_count = round_up_to_next_power_of_two(iterations);
+  input_count = round_up_to_next_power_of_two (iterations);
   count_circuit_components_m = iterations;
-  gates += (iterations-1);
-  ret_val = build_circuit_rec_m(input_count, simpaig_or, simpaig_false (mgr));
-  assert(count_circuit_components_m == 0);
-  free(circuit_components_m);
+  gates += (iterations - 1);
+  ret_val = build_circuit_rec_m (input_count, simpaig_or, simpaig_false (mgr));
+  assert (count_circuit_components_m == 0);
+  free (circuit_components_m);
   return ret_val;
 }
 
@@ -2588,7 +2588,7 @@ next_symbol (unsigned idx)
 {
   unsigned len;
 
-  len = 20;
+  len = 50;
 
   if (size_outbuffer < len)
   {
@@ -2657,6 +2657,7 @@ expand (simpaig * aig)
   free (aigs);
   simpaig_reset_indices (mgr);
   free (outbuffer);
+  size_outbuffer = 0;
 }
 
 
@@ -2730,7 +2731,6 @@ check_interpolation_invariant (simpaig *invariant)
   FILE *file; 
 
   output_aig = aiger_init ();
-
   expand (invariant);
   file = booleforce_open_file_for_writing ("sanity.aig");
   aiger_write_to_file (output_aig, aiger_binary_mode, file);
@@ -2761,7 +2761,7 @@ compute_itp (Clause * clause)
   len = length_ints(clause->antecedents);
 
   // TODO use realloc and maybe booleforce mem managment
-  tmp = malloc(len * sizeof(circuit_components_itp[0]));
+  tmp = malloc(len * sizeof (circuit_components_itp[0]));
   if(tmp != NULL)
   {
     circuit_components_itp = tmp;
@@ -2803,28 +2803,28 @@ compute_itp (Clause * clause)
 
     iterations++;
   }
-  input_count = round_up_to_next_power_of_two(len);
+  input_count = round_up_to_next_power_of_two (len);
 
   if (clause->partition == B ||
        (clause->partition == AB && itp_system_strength == 1))
-    clause->itp = build_circuit_rec_itp(input_count, simpaig_and, simpaig_true (mgr));
+    clause->itp = build_circuit_rec_itp (input_count, simpaig_and, simpaig_true (mgr));
   else if (clause->partition == A ||
        (clause->partition == AB && itp_system_strength == 2))
-    clause->itp = build_circuit_rec_itp(input_count, simpaig_or, simpaig_false (mgr));
+    clause->itp = build_circuit_rec_itp (input_count, simpaig_or, simpaig_false (mgr));
   else
     return check_error ("that itp system does not exist.");
 
   num_derived_clauses_after_split++;
   num_antecedents_after += iterations;
-  gates += (len-1);
+  gates += (len - 1);
 
   assert(count_circuit_components_itp == 0);
   free(circuit_components_itp);
 
 #ifndef NDEBUG
   // Note: remove to check invariant for all chains, 
-  //if(clause->idx != empty_cls_idx)
-    //return 1;
+  if(clause->idx != empty_cls_idx)
+    return 1;
 
   simpaig *sanity_tmp, *invariant;
 
