@@ -3195,7 +3195,7 @@ forall_clauses (int (*checker) (Clause *), const char *verbose_msg)
  * verbose message is printed
  */
   static int
-forall_clauses_manipulate (int (*checker) (Clause **), const char *verbose_msg)
+forall_clauses_mutable (int (*checker) (Clause **), const char *verbose_msg)
 {
   double start_time = booleforce_time_stamp ();
   Clause **clause;
@@ -3301,7 +3301,7 @@ check (void)
   num_derived_clauses_before_split = num_derived_clauses;
   num_antecedents_before_split = num_antecedents;
   init_max_cls_idx = max_cls_idx;
-  if (!forall_clauses_manipulate (resolve_and_split, "resolution"))
+  if (!forall_clauses_mutable (resolve_and_split, "resolution"))
     return 0;
 
 #ifndef NDEBUG
@@ -3310,8 +3310,11 @@ check (void)
   forall_clauses (compute_partition_aigs, "partition aigs");
 #endif
 
-  if (!forall_clauses (compute_itp, "interpolation"))
-    return 0;
+  if (interpolant)
+  {
+    if (!forall_clauses (compute_itp, "interpolation"))
+      return 0;
+  }
 
   if (!forall_clauses (merge_literals_count, "merge_literals_count"))
     return 0;
@@ -3857,13 +3860,15 @@ tracecheck_main (int argc, char **argv)
       {
         if (check ())
         {
-          output_aig = aiger_init ();
-          final_itp = clauses[empty_cls_idx]->itp;
-          expand (final_itp);
           if (interpolant)
-            aiger_write_to_file (output_aig, aiger_binary_mode, interpolant);
-          simpaig_dec (mgr, final_itp);
-          aiger_reset (output_aig);
+          {
+            output_aig = aiger_init ();
+            final_itp = clauses[empty_cls_idx]->itp;
+            expand (final_itp);
+              aiger_write_to_file (output_aig, aiger_binary_mode, interpolant);
+            simpaig_dec (mgr, final_itp);
+            aiger_reset (output_aig);
+          }
 
           if (stats_file)
             print_stats ();
