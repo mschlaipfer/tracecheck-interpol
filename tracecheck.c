@@ -1833,6 +1833,7 @@ collect_literals (Clause * clause)
       if (literals[lit].mark & 1)
       {
         literals[lit].mark |= 4;
+        assert (literals[lit].label != UNDEF);
         literals[lit].label |= label;
       }
       else if (literals[lit].mark == 0)
@@ -1841,7 +1842,10 @@ collect_literals (Clause * clause)
         literals[lit].label = label;
       }
       else if (literals[lit].mark & 2)
+      {
+        assert (literals[lit].label != UNDEF);
         literals[lit].mark |= 4;
+      }
 
       if (literals[-lit].mark)
       {
@@ -2038,7 +2042,6 @@ add_literal_to_resolvent (int idx, short label)
   lit->mark = count_resolvent + 1;
   lit->label = label;
   push_resolvent (idx);
-  literals[idx].label = label;
   assert (resolvent[lit->mark - 1] == idx);
 }
 
@@ -2056,15 +2059,17 @@ add_to_resolvent_except (Clause * clause, int idx)
     if (other == idx)
       continue;
 
-    /* skip literals already part of resolvent
+    /* Note: skip literals already part of resolvent
+             or add them
+       merge of lit here
      */
-    if (literals[other].mark) {
-      //TODO merge of lit here
+    if (literals[other].mark)
+    {
+      assert (literals[other].label != UNDEF);
       literals[other].label |= clause->labels[p - clause->literals];
-      continue;
     }
-
-    add_literal_to_resolvent (other, clause->labels[p - clause->literals]);
+    else 
+      add_literal_to_resolvent (other, clause->labels[p - clause->literals]);
   }
 }
 
@@ -2099,7 +2104,7 @@ print_resolvent (const char *type)
 /*------------------------------------------------------------------------*/
 
   inline static int
-resolve_clause (Clause * clause, Clause * context, short pivlab)
+resolve_clause (Clause * clause, Clause * context, short pivot_label)
 {
   int idx;
 
@@ -2114,7 +2119,7 @@ resolve_clause (Clause * clause, Clause * context, short pivlab)
 #endif
 
   // check whether chain is contiguously labeled.
-  if (pivlab != UNDEF && pivlab != literals[-idx].label)
+  if (pivot_label != UNDEF && pivot_label != literals[-idx].label)
     return idx;
 
   remove_literal_from_resolvent (-idx);
@@ -2284,13 +2289,13 @@ check_prestine_chain (Clause * clause)
 resolve_and_split (Clause ** clause)
 {
   int *p, idx, iterations, count, prev, i, lit, len;
-  short pivlab;
+  short pivot_label;
   Clause *antecedent;
 #ifndef NDEBUG
   int *q, idx2;
 #endif
 
-  pivlab = UNDEF;
+  pivot_label = UNDEF;
   if (!(*clause)->antecedents)
     goto POST_PROCESS_RESOLVED_CHAIN;
 
@@ -2354,14 +2359,16 @@ resolve_and_split (Clause ** clause)
     assert (antecedent);
     assert (antecedent->resolved);
 
-    if (!(lit = resolve_clause (antecedent, (*clause), pivlab)))
+    if (!(lit = resolve_clause (antecedent, (*clause), pivot_label)))
       return 0;
 
     // check whether chain is contiguously labeled.
     // Note: careful with lit/idx
-    if (pivlab != UNDEF && pivlab != literals[-lit].label)
+    // literals[-lit].label is the merged label of the pivot literals
+    if (pivot_label != UNDEF && pivot_label != literals[-lit].label)
     {
       // NEW SPLIT
+      // TODO refactor into new function
       num_splits++;
       (*clause)->split = 1;
 
@@ -2392,8 +2399,9 @@ resolve_and_split (Clause ** clause)
       (*clause)->resolved = 1;
 #endif
       *clause = intermediate;
-      // TODO this here:
-      // literals[-lit].label = UNDEF;
+      // Note: Reset not necessary because label is set from clause label anyhow
+      // before merge
+      literals[-lit].label = UNDEF;
       break;
     }
     // else
@@ -2402,13 +2410,11 @@ resolve_and_split (Clause ** clause)
     // not included
     push_stack(idx);
 
-    pivlab = literals[-lit].label;
-    // TODO right spot to reset label?
-    literals[-lit].label = UNDEF;
+    pivot_label = literals[-lit].label;
 
 #ifndef NDEBUG
     for (q = (*clause)->literals; (idx2 = *q); q++) {
-      assert(idx2 != lit && idx2 != -lit);
+      assert (idx2 != lit && idx2 != -lit);
     }
 #endif
     
@@ -2450,7 +2456,9 @@ resolve_and_split (Clause ** clause)
   for (p = resolvent; (idx = *p); p++)
   {
     literals[idx].mark = 0;
-    literals[idx].label = UNDEF; //???
+    // Note: Reset not necessary because label is set from clause label anyhow
+    // before merge
+    literals[idx].label = UNDEF;
   }
 
   if (!subsumes (resolvent, (*clause)->literals))
@@ -2463,8 +2471,15 @@ resolve_and_split (Clause ** clause)
 
   count_resolvent = 0;
 
-  if((*clause)->antecedents)
-    (*clause)->partition = pivlab;
+  // Note: delete the stack if we haven't used it to copy the antecedents from
+  // it
+  // TODO: enough to free memory of stack or leaking here?
+  count_stack = 0;
+
+  // Note: would jump over this otherwise anyhow
+  // if((*clause)->antecedents)
+  (*clause)->partition = pivot_label;
+  assert ((*clause)->partition != UNDEF);
 
 POST_PROCESS_RESOLVED_CHAIN:
 
@@ -2483,17 +2498,11 @@ POST_PROCESS_RESOLVED_CHAIN:
 
     if (ebintrace)
       print_clause (*clause, 1, ebintrace);
-
   }
 
 #ifndef NDEBUG
   (*clause)->resolved = 1;
 #endif
-
-  // TODO: leaking here?
-  // we have to delete the stack if we haven't used it to copy the antecedents
-  // from it
-  count_stack = 0;
 
   return 1;
 }
@@ -2505,7 +2514,7 @@ mark_resolvent (Clause * clause)
 
   for (p = clause->literals; (idx = *p); p++)
   {
-    //assert(literals[idx].mark == 0);
+    assert (!literals[idx].mark);
     literals[idx].mark = 1;
   }
 }
@@ -2517,7 +2526,7 @@ unmark_resolvent (Clause * clause)
 
   for (p = clause->literals; (idx = *p); p++)
   {
-    assert(literals[idx].mark);
+    assert (literals[idx].mark);
     literals[idx].mark = 0;
   }
 }
@@ -2818,7 +2827,7 @@ compute_itp (Clause * clause)
   num_antecedents_after += iterations;
   gates += (len - 1);
 
-  assert(count_circuit_components_itp == 0);
+  assert (count_circuit_components_itp == 0);
   free(circuit_components_itp);
 
 #ifndef NDEBUG
