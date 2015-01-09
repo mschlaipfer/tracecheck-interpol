@@ -2558,6 +2558,7 @@ compute_m (Clause * clause)
   {
     circuit_components_m = tmp;
     // TODO len isn't the actual number of components
+    //      iterations after loops is
     //    count_circuit_components_m = len;
   }
 
@@ -3405,9 +3406,6 @@ release (void)
   release_resolvent ();
   release_labels ();
 
-  if (literals)
-    release_literals ();
-
   if (cells)
     BOOLEFORCE_DELETE_ARRAY (cells, size_cells);
 
@@ -3874,7 +3872,7 @@ tracecheck_main (int argc, char **argv)
             output_aig = aiger_init ();
             final_itp = clauses[empty_cls_idx]->itp;
             expand (final_itp);
-              aiger_write_to_file (output_aig, aiger_binary_mode, interpolant);
+            aiger_write_to_file (output_aig, aiger_binary_mode, interpolant);
             simpaig_dec (mgr, final_itp);
             aiger_reset (output_aig);
           }
@@ -3891,11 +3889,17 @@ tracecheck_main (int argc, char **argv)
         }
         else
           res = 1;
+
+        // simpaig clean-up
+        if (literals)
+          release_literals ();
+        simpaig_reset (mgr);
       }
     }
     else
       res = 1;
 
+    // Booleforce clean-up
     release ();
   }
 
@@ -3911,7 +3915,6 @@ tracecheck_main (int argc, char **argv)
   }
 
   reset ();			/* no code between 'reset' and 'return' */
-  simpaig_reset (mgr);
 
   return res;
 }
