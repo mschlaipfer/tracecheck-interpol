@@ -221,6 +221,7 @@ static FILE * bintrace;
 static FILE * ebintrace;
 static FILE * restrace;
 static FILE * rpttrace;
+static FILE * dotgraph;
 
 /*------------------------------------------------------------------------*/
 
@@ -2230,6 +2231,19 @@ write_rpt_line (int count, int literal, int op1, int op2)
   fwrite (buffer, sizeof (int), 4, rpttrace);
 }
 
+  static void
+write_dotgraph_header (void)
+{
+  // TODO sanitize input_name and use it
+  fprintf (dotgraph, "digraph resproof {\n");
+}
+
+  static void
+write_dotgraph_footer (void)
+{
+  fprintf (dotgraph, "}");
+}
+
 /*------------------------------------------------------------------------*/
 #ifndef NDEBUG
 /*------------------------------------------------------------------------*/
@@ -2341,6 +2355,8 @@ resolve_and_split (Clause ** clause)
     LOG ("copying antecedent clause %d as initial resolvent",
         antecedent->idx);
 #endif
+  if (dotgraph)
+    fprintf (dotgraph, "n_%d -> n_%d;\n", antecedent->idx, (*clause)->idx);
 
   /* Further try to resolve in the given order the remaining clauses with
    * the current resolvent to obtain the next intermediate resolvent.
@@ -2388,7 +2404,8 @@ resolve_and_split (Clause ** clause)
       // in order not to leak memory
       // copy relevant memory region and free previously used memory
       (*clause)->antecedents[iterations - 1] = new_idx;
-      int *tmp = copy_ints((*clause)->antecedents + (iterations - 1), length_ints((*clause)->antecedents) - (iterations - 1));
+      int *tmp = copy_ints((*clause)->antecedents + (iterations - 1),
+                     length_ints((*clause)->antecedents) - (iterations - 1));
       booleforce_delete_ints ((*clause)->antecedents);
       (*clause)->antecedents = tmp;
 
@@ -2436,6 +2453,10 @@ resolve_and_split (Clause ** clause)
       write_res_line (count, lit, 
           prev, antecedent->newidx,
           count_resolvent, resolvent);
+
+    if (dotgraph)
+      fprintf (dotgraph, "n_%d -> n_%d;\n", antecedent->idx, (*clause)->idx);
+
     prev = count++;
   }
 
@@ -2500,6 +2521,10 @@ POST_PROCESS_RESOLVED_CHAIN:
       print_clause (*clause, 1, ebintrace);
   }
 
+  if (dotgraph)
+    fprintf (dotgraph, "n_%d [label=\"%d\"];\n", (*clause)->idx,
+        (*clause)->partition);
+      
 #ifndef NDEBUG
   (*clause)->resolved = 1;
 #endif
@@ -2532,7 +2557,7 @@ unmark_resolvent (Clause * clause)
 }
 
   static int
-round_up_to_next_power_of_two (int v)
+rnd_up_pow2 (int v)
 {
   v--;
   v |= v >> 1;
@@ -2580,7 +2605,7 @@ compute_m (Clause * clause)
       literals[idx].mark = 0;
   }
 
-  input_count = round_up_to_next_power_of_two (iterations);
+  input_count = rnd_up_pow2 (iterations);
   count_circuit_components_m = iterations;
   gates += (iterations - 1);
   ret_val = build_circuit_rec_m (input_count, simpaig_or, simpaig_false (mgr));
@@ -2813,7 +2838,7 @@ compute_itp (Clause * clause)
 
     iterations++;
   }
-  input_count = round_up_to_next_power_of_two (len);
+  input_count = rnd_up_pow2 (len);
 
   if (clause->partition == B ||
        (clause->partition == AB && itp_system_strength == 1))
@@ -2842,11 +2867,15 @@ compute_itp (Clause * clause)
   invariant = simpaig_and(mgr, sanity_tmp, simpaig_not(compute_upward_projection(clause, A)));
   if (!check_interpolation_invariant(invariant))
     return check_error("violated itp invariant in clause %d\n", clause->idx);
+  simpaig_dec (mgr, sanity_tmp);
+  simpaig_dec (mgr, invariant);
 
   sanity_tmp = simpaig_and(mgr, partition_b, clause->itp);
   invariant = simpaig_and(mgr, sanity_tmp, simpaig_not(compute_upward_projection(clause, B)));
   if (!check_interpolation_invariant(invariant))
     return check_error("violated itp invariant in clause %d\n", clause->idx);
+  simpaig_dec (mgr, sanity_tmp);
+  simpaig_dec (mgr, invariant);
 
   printf("OKAY: partial interpolant @ clause %d\n", clause->idx); 
 
@@ -3308,6 +3337,9 @@ check (void)
   if (rpttrace)
     write_rpt_header ();
 
+  if (dotgraph)
+    write_dotgraph_header ();
+
   num_derived_clauses_before_split = num_derived_clauses;
   num_antecedents_before_split = num_antecedents;
   init_max_cls_idx = max_cls_idx;
@@ -3369,8 +3401,9 @@ release_literals (void)
 
   for (i = -max_lit_idx; i <= max_lit_idx; i++)
   {
-    if (i > 0)
-      simpaig_dec (mgr, literals[i].aig);
+    // TODO simpaig_dec final_itp should take care of this
+    //if (i > 0)
+      //simpaig_dec (mgr, literals[i].aig); // dec variables
 
     RECYCLE_CELLS (literals[i].clauses);
   }
@@ -3446,6 +3479,12 @@ reset (void)
   {
     booleforce_close_file (restrace);
     restrace = 0;
+  }
+
+  if (dotgraph)
+  {
+    booleforce_close_file (dotgraph);
+    dotgraph = 0;
   }
 
   if (interpolant)
@@ -3795,6 +3834,21 @@ tracecheck_main (int argc, char **argv)
               "expected number as argument to '-e' but got '%s'", arg);
       }
     }
+    else if (!strcmp (argv[i], "-d"))
+    {
+      if (++i == argc)
+        res = option_error ("argument to '-d' missing");
+      else if (dotgraph)
+        res = option_error ("multiple '-d' options");
+      else
+      {
+        file = booleforce_open_file_for_writing (argv[i]);
+        if (file)
+          dotgraph = file;
+        else
+          res = option_error ("can not write to '%s'", argv[i]);
+      }
+    }
     else if (!strcmp (argv[i], "--print"))
       print_only = 1;
     else if (!strcmp (argv[i], "--linear"))
@@ -3873,12 +3927,15 @@ tracecheck_main (int argc, char **argv)
             final_itp = clauses[empty_cls_idx]->itp;
             expand (final_itp);
             aiger_write_to_file (output_aig, aiger_binary_mode, interpolant);
-            simpaig_dec (mgr, final_itp);
             aiger_reset (output_aig);
+            simpaig_dec (mgr, final_itp);
           }
 
           if (stats_file)
             print_stats ();
+
+          if (dotgraph)
+            write_dotgraph_footer ();
 
           fprintf (output,
             "resolved %d root%s and %d empty clause%s\n",
