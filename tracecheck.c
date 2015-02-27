@@ -1,5 +1,5 @@
 /*------------------------------------------------------------------------*/
-/* Copyright (c) 2005 - 2010 Armin Biere, Johannes Kepler University.     */
+/* Copyright (c) 2005 - 2015 Armin Biere, Johannes Kepler University.     */
 /*------------------------------------------------------------------------*/
 
 /*-----------------------------------------------------------------------*\
@@ -7,11 +7,11 @@
  * the seperate documentation file 'README.tracecheck'.
  *
  * Armin Biere, JKU Linz, 2005.
- \*-----------------------------------------------------------------------*/
+\*-----------------------------------------------------------------------*/
 
 /*-----------------------------------------------------------------------*\
  * TODO:
- *   
+ *
  *   1. allow multiple occurrences of the same literal and the same
  *   antecedent by making the error that currently is reported into a
  *   warning
@@ -44,6 +44,14 @@
 #include "simpaig.h"
 #include "aiger.h"
 
+
+#ifndef NDEBUG
+#define SANITY_AIG "/tmp/sanity.aig"
+#define SANITY_CNF "/tmp/sanity.cnf"
+#define AIGTOCNF_PATH "~/tools/aiger-1.9.4/aigtocnf"
+#define PICOSAT_PATH "~/tools/picosat-959/picosat"
+#endif
+
 /*------------------------------------------------------------------------*/
 
 #define VPFX "c "		/* verbose output prefix string */
@@ -74,7 +82,7 @@
  * the stack are defined by the macro 'DefineIntStackFunctions'.
  */
 #define DeclareIntStack(name) \
-  static int * name; \
+static int * name; \
 static int size_ ## name; \
 static int count_ ## name
 
@@ -83,7 +91,7 @@ static int count_ ## name
  * the stack are defined by the macro 'DefineAIGStoreFunctions'.
  */
 #define DeclareAIGComponentStorage(name) \
-  static simpaig ** name; \
+static simpaig ** name; \
 static int count_ ## name
 /*------------------------------------------------------------------------*/
 
@@ -93,52 +101,48 @@ typedef struct Literal Literal;	/* signed */
 
 /*------------------------------------------------------------------------*/
 
-enum Boole
-{
-  FALSE = -1,
-  UNKNOWN = 0,
-  TRUE = 1,
+enum Boole {
+    FALSE = -1,
+    UNKNOWN = 0,
+    TRUE = 1,
 };
 
 /*------------------------------------------------------------------------*/
 
-enum Format
-{
-  ASCII_FORMAT,
-  BINARY_FORMAT,
-  COMPRESSED_FORMAT
+enum Format {
+    ASCII_FORMAT,
+    BINARY_FORMAT,
+    COMPRESSED_FORMAT
 };
 
 typedef enum Format Format;
 
 /*------------------------------------------------------------------------*/
 
-struct Clause
-{
-  Clause *next_in_order;	/* links relevant clauses */
-  Clause *dfs_tree_parent;	/* graph parent in DFS tree */
-  int *labels; /* zero terminated list */
-  int *literals;		/* zero terminated list */
-  int *antecedents;		/* zero terminated list */
-  int idx;			/* "<0"=original, ">0"=derived */
-  int newidx;			/* "<0"=original, ">0"=derived */
-  int mark;			/* graph traversal */
-  simpaig *itp; /* partial interpolant */
-  unsigned lineno: 28;			/* where the definition started */
-  unsigned partition : 3;
-  unsigned split: 1;
+struct Clause {
+    Clause *next_in_order;	/* links relevant clauses */
+    Clause *dfs_tree_parent;	/* graph parent in DFS tree */
+    int *labels; /* zero terminated list */
+    int *literals;		/* zero terminated list */
+    int *antecedents;		/* zero terminated list */
+    int idx;			/* "<0"=original, ">0"=derived */
+    int newidx;			/* "<0"=original, ">0"=derived */
+    int mark;			/* graph traversal */
+    simpaig *itp; /* partial interpolant */
+    unsigned lineno: 28;			/* where the definition started */
+    unsigned partition : 3;
+    unsigned split: 1;
 #ifndef NDEBUG
-  unsigned resolved:1;		/* 1 iff already resolved */
+    unsigned resolved:1;		/* 1 iff already resolved */
 #endif
 };
 
 /*------------------------------------------------------------------------*/
 /* List node for occurrence lists of literals.
  */
-struct Cell
-{
-  Cell *tail;
-  void *head;
+struct Cell {
+    void *head;
+    Cell *tail;
 };
 
 /*------------------------------------------------------------------------*/
@@ -150,19 +154,17 @@ struct Cell
 // A pointer uses 8 bytes, so we need to use a second chunk of 8 bytes in any
 // case. Whether that is through padding or data doesn't make a difference, so
 // we use mark (4) + label (2) + partition (2) = 8 bytes.
-struct Literal
-{
-  Cell *clauses;		/* occurrence lists in chain */
-  // also stores index of intermediate clause
+struct Literal {
+    Cell *clauses;		/* occurrence lists in chain */
 
-  // local and reset
-  int mark;
-  short label;
+    // local and reset
+    int mark;
+    short label;
 
-  simpaig *aig;
-  unsigned idx;
-  // global for whole proof
-  short partition;
+    simpaig *aig;
+    unsigned idx;
+    // global for whole proof
+    short partition;
 };
 
 /*------------------------------------------------------------------------*/
@@ -215,12 +217,13 @@ static int itp_system_strength;
 
 /*------------------------------------------------------------------------*/
 
-static FILE * stats_file;
-static FILE * interpolant;
 static FILE * bintrace;
 static FILE * ebintrace;
 static FILE * restrace;
 static FILE * rpttrace;
+static FILE * etrace;
+static FILE * stats_file;
+static FILE * interpolant;
 static FILE * dotgraph;
 
 /*------------------------------------------------------------------------*/
@@ -245,7 +248,7 @@ static int assume_already_linearized;
 static int lax;
 
 /*------------------------------------------------------------------------*/
-/* head of list (Clause.next_in_order) 
+/* head of list (Clause.next_in_order)
  */
 static Clause *first_in_order;
 
@@ -291,11 +294,11 @@ static char *outbuffer;
 static unsigned size_outbuffer;
 
 enum Label {
-  UNDEF = -1,
-  BOT = 0,
-  A = 1,
-  B = 2,
-  AB = 3,
+    UNDEF = -1,
+    BOT = 0,
+    A = 1,
+    B = 2,
+    AB = 3,
 };
 
 /*------------------------------------------------------------------------*/
@@ -337,9 +340,8 @@ static double entered_time;
 /*------------------------------------------------------------------------*/
 /***** END OF STATIC VARIABLES ********************************************/
 /*------------------------------------------------------------------------*/
-
-#define DefineIntStackFunctions(name) \
-  static void \
+#define DefineIntStackFunctionsNoPop(name) \
+static void \
 enlarge_ ## name (void) \
 { \
   int new_size_ ## name = size_ ## name ? 2 * size_ ## name : 1; \
@@ -351,18 +353,9 @@ inline static void \
 push_ ## name (int n) \
 { \
   if (size_ ## name == count_ ## name) \
-  enlarge_ ## name (); \
-  \
-  name[count_ ## name++] = n; \
-} \
-\
-inline static int \
-pop_ ## name (void) \
-{ \
-  int res; \
-  assert (count_ ## name > 0); \
-  res =  name[--count_ ## name]; \
-  return res; \
+    enlarge_ ## name (); \
+ \
+   name[count_ ## name++] = n; \
 } \
 \
 static void \
@@ -374,13 +367,26 @@ release_ ## name (void) \
   count_ ## name = 0; \
 }
 
+#define DefineIntStackFunctions(name) \
+\
+DefineIntStackFunctionsNoPop(name) \
+\
+inline static int \
+pop_ ## name (void) \
+{ \
+  int res; \
+  assert (count_ ## name > 0); \
+  res =  name[--count_ ## name]; \
+  return res; \
+}
+
 /*------------------------------------------------------------------------*/
 /* *INDENT-OFF* */
 DefineIntStackFunctions(stack)
 DefineIntStackFunctions(resolvent)
-DefineIntStackFunctions(roots)
+DefineIntStackFunctionsNoPop(roots)
 DefineIntStackFunctions(trail);
-DefineIntStackFunctions(labels);
+DefineIntStackFunctionsNoPop(labels);
 /* *INDENT-ON* */
 /*------------------------------------------------------------------------*/
 
@@ -415,33 +421,33 @@ DefineAIGStoreFunctions(itp);
 /*------------------------------------------------------------------------*/
 
 
-  static void
+static void
 LOG (const char *fmt, ...)
 {
-  va_list ap;
+    va_list ap;
 
-  fputs (VPFX, output);
-  va_start (ap, fmt);
-  vfprintf (output, fmt, ap);
-  va_end (ap);
-  fputc ('\n', output);
+    fputs (VPFX, output);
+    va_start (ap, fmt);
+    vfprintf (output, fmt, ap);
+    va_end (ap);
+    fputc ('\n', output);
 }
 
 /*------------------------------------------------------------------------*/
 /* Lisp's 'cons' operator for generated a linked list node.
  */
-  inline static Cell *
+inline static Cell *
 cons (Cell * tail, void *head)
 {
-  Cell *res;
+    Cell *res;
 
-  assert (free_cells);
-  res = free_cells;
-  free_cells = cdr (res);
-  res->head = head;
-  res->tail = tail;
+    assert (free_cells);
+    res = free_cells;
+    free_cells = cdr (res);
+    res->head = head;
+    res->tail = tail;
 
-  return res;
+    return res;
 }
 
 /*------------------------------------------------------------------------*/
@@ -452,247 +458,240 @@ cons (Cell * tail, void *head)
 /*------------------------------------------------------------------------*/
 /* Recycle all cells reachable from 'root'.
  */
-  static void
+static void
 recycle_cells (Cell * root)
 {
-  Cell *p, *tail;
+    Cell *p, *tail;
 
-  assert (root);
+    assert (root);
 
-  for (p = root; (tail = cdr (p)); p = tail)
-    ;
+    for (p = root; (tail = cdr (p)); p = tail)
+        ;
 
-  p->tail = free_cells;
-  free_cells = root;
+    p->tail = free_cells;
+    free_cells = root;
 }
 
 /*------------------------------------------------------------------------*/
 
 #define RECYCLE_CELLS(root) \
-  do { \
-    if (!(root)) \
+do { \
+  if (!(root)) \
     break; \
-    recycle_cells (root); \
-    (root) = 0; \
-  } while(0)
+  recycle_cells (root); \
+  (root) = 0; \
+} while(0)
 
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 recycle_cell (Cell * cell)
 {
-  cell->tail = free_cells;
-  free_cells = cell;
+    cell->tail = free_cells;
+    free_cells = cell;
 }
 
 /*------------------------------------------------------------------------*/
+#if 0
 
-  inline static int
+inline static int
 length_gt_than (Cell * root, int n)
 {
-  Cell *p;
-  int i;
+    Cell *p;
+    int i;
 
-  assert (n >= 0);
+    assert (n >= 0);
 
-  i = 0;
-  for (p = root; p; p = cdr (p))
-    if (++i > n)
-      return 1;
+    i = 0;
+    for (p = root; p; p = cdr (p))
+        if (++i > n)
+            return 1;
 
-  return 0;
+    return 0;
 }
 
+#endif
 /*------------------------------------------------------------------------*/
 
-  static size_t
+static size_t
 length_ints (int *a)
 {
-  size_t res;
-  int *p;
+    size_t res;
+    int *p;
 
-  assert (a);
+    assert (a);
 
-  res = 0;
-  for (p = a; *p; p++)
-    res++;
+    res = 0;
+    for (p = a; *p; p++)
+        res++;
 
-  return res;
+    return res;
 }
 
 /*------------------------------------------------------------------------*/
 
 // TODO: num_derived not correct as it is used with splits as well
-  inline static Clause *
+inline static Clause *
 add_clause (int idx, int *literals, int *antecedents, int lineno)
 {
-  int new_size, llen, alen;
-  Clause *res, **p;
-  size_t res_bytes;
+    int new_size, llen, alen;
+    Clause *res, **p;
+    size_t res_bytes;
 
-  assert (idx);
-  assert (idx > 0);
+    assert (idx);
+    assert (idx > 0);
 
-  if(idx > max_cls_idx)
-    max_cls_idx = idx;
+    if(idx > max_cls_idx)
+        max_cls_idx = idx;
 
-  if (literals && !literals[0])
-    num_empty_clauses++;
+    if (literals && !literals[0])
+        num_empty_clauses++;
 
-  llen = literals ? length_ints (literals) : 0;
-  alen = antecedents ? length_ints (antecedents) : 0;
+    llen = literals ? length_ints (literals) : 0;
+    alen = antecedents ? length_ints (antecedents) : 0;
 
-  res_bytes = sizeof (*res);
-  res = booleforce_new (res_bytes);
+    res_bytes = sizeof (*res);
+    res = booleforce_new (res_bytes);
 
-  res->idx = idx;
-  res->lineno = lineno;
-  assert (!res->mark);
+    res->idx = idx;
+    res->lineno = lineno;
+    assert (!res->mark);
 
-  res->literals = literals;
-  res->antecedents = antecedents;
+    res->literals = literals;
+    res->antecedents = antecedents;
 
-  while (idx >= size_clauses)
-  {
-    if (!(new_size = 2 * size_clauses))
-      new_size = 1;
+    while (idx >= size_clauses) {
+        if (!(new_size = 2 * size_clauses))
+            new_size = 1;
 
-    BOOLEFORCE_ENLARGE_ARRAY (clauses, size_clauses, new_size);
-    size_clauses = new_size;
-  }
+        BOOLEFORCE_ENLARGE_ARRAY (clauses, size_clauses, new_size);
+        size_clauses = new_size;
+    }
 
-  p = clauses + idx;
+    p = clauses + idx;
 
-  if (antecedents)
-  {
-    num_derived_clauses++;
-    num_antecedents += alen;
+    if (antecedents) {
+        num_derived_clauses++;
+        num_antecedents += alen;
 
-    if (literals)
-      num_derived_literals += llen;
+        if (literals)
+            num_derived_literals += llen;
 
-    if (!min_derived_idx || idx < min_derived_idx)
-      min_derived_idx = idx;
-  }
-  else
-  {
-    num_original_clauses++;
+        if (!min_derived_idx || idx < min_derived_idx)
+            min_derived_idx = idx;
+    } else {
+        num_original_clauses++;
 
-    if (idx > max_original_idx)
-      max_original_idx = idx;
+        if (idx > max_original_idx)
+            max_original_idx = idx;
 
-    if (literals)
-      num_original_literals += llen;
-  }
+        if (literals)
+            num_original_literals += llen;
+    }
 
-  assert (!*p);
-  *p = res;
+    assert (!*p);
+    *p = res;
 
-  return res;
+    return res;
 }
 
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 delete_clause (Clause * clause)
 {
-  assert (clause);
+    assert (clause);
 
-  if (clause->literals)
-    booleforce_delete_ints (clause->literals);
+    if (clause->literals)
+        booleforce_delete_ints (clause->literals);
 
-  if (clause->antecedents)
-    booleforce_delete_ints (clause->antecedents);
+    if (clause->antecedents)
+        booleforce_delete_ints (clause->antecedents);
 
-  if (clause->labels)
-    booleforce_delete_ints (clause->labels);
+    if (clause->labels)
+        booleforce_delete_ints (clause->labels);
 
-  booleforce_delete (clause, sizeof (*clause));
+    booleforce_delete (clause, sizeof (*clause));
 }
 
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 print_zero_terminated_array (int *a, FILE * file)
 {
-  int *p, i;
+    int *p, i;
 
-  for (p = a; (i = *p); p++)
-    fprintf (file, "%d ", i);
+    for (p = a; (i = *p); p++)
+        fprintf (file, "%d ", i);
 
-  fputc ('0', file);
+    fputc ('0', file);
 }
 
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 print_clause (Clause * clause, int print_literals, FILE * file)
 {
-  assert (clause);
-  fprintf (file, "%d ", clause->idx);
+    assert (clause);
+    fprintf (file, "%d ", clause->idx);
 
-  if ((print_literals || !clause->antecedents) && clause->literals)
-    print_zero_terminated_array (clause->literals, file);
-  else
-    fputc ('*', file);
+    if ((print_literals || !clause->antecedents) && clause->literals)
+        print_zero_terminated_array (clause->literals, file);
+    else
+        fputc ('*', file);
 
-  if (clause->antecedents)
-  {
-    fputc (' ', file);
-    print_zero_terminated_array (clause->antecedents, file);
-  }
-  else
-    fputs (" 0", file);
+    if (clause->antecedents) {
+        fputc (' ', file);
+        print_zero_terminated_array (clause->antecedents, file);
+    } else
+        fputs (" 0", file);
 
-  fputc ('\n', file);
+    fputc ('\n', file);
 }
 
 /*------------------------------------------------------------------------*/
 
-  static void
-print (void)
+static void
+print (FILE * file)
 {
-  Clause *clause;
-  int i;
+    Clause *clause;
+    int i;
 
-  for (i = 1; i < size_clauses; i++)
-    if ((clause = clauses[i]))
-      print_clause (clause, 1, output);
+    for (i = 1; i < size_clauses; i++)
+        if ((clause = clauses[i]))
+            print_clause (clause, 1, file);
 }
 
 /*------------------------------------------------------------------------*/
 
-  inline static int
+inline static int
 next_char (void)
 {
-  int ch;
+    int ch;
 
-  if (previous_char != EOF)
-  {
-    ch = previous_char;
-    previous_char = EOF;
-  }
-  else
-    ch = next_char_from_buffer (buffer);
+    if (previous_char != EOF) {
+        ch = previous_char;
+        previous_char = EOF;
+    } else
+        ch = next_char_from_buffer (buffer);
 
-  if (ch == '\n')
-    current_lineno++;
+    if (ch == '\n')
+        current_lineno++;
 
-  return ch;
+    return ch;
 }
 
 /*------------------------------------------------------------------------*/
 
-  inline static void
+inline static void
 put_back_char (int ch)
 {
-  assert (previous_char == EOF);
-  previous_char = ch;
-  if (ch == '\n')
-  {
-    assert (current_lineno > 1);
-    current_lineno--;
-  }
+    assert (previous_char == EOF);
+    previous_char = ch;
+    if (ch == '\n') {
+        assert (current_lineno > 1);
+        current_lineno--;
+    }
 }
 
 /*------------------------------------------------------------------------*/
@@ -710,402 +709,384 @@ put_back_char (int ch)
 
 /*------------------------------------------------------------------------*/
 
-  static int
+static int
 scan_error (const char *fmt, ...)
 {
-  va_list ap;
+    va_list ap;
 
-  fprintf (output, "%s:%d: ", input_name, last_token_lineno);
-  va_start (ap, fmt);
-  vfprintf (output, fmt, ap);
-  va_end (ap);
-  fputc ('\n', output);
+    fprintf (output, "%s:%d: ", input_name, last_token_lineno);
+    va_start (ap, fmt);
+    vfprintf (output, fmt, ap);
+    va_end (ap);
+    fputc ('\n', output);
 
-  return ERROR;
+    return ERROR;
 }
 
 /*------------------------------------------------------------------------*/
 
-  static int
+static int
 option_error (const char *fmt, ...)
 {
-  va_list ap;
+    va_list ap;
 
-  fputs (EPFX, output);
-  va_start (ap, fmt);
-  vfprintf (output, fmt, ap);
-  va_end (ap);
-  fputc ('\n', output);
+    fputs (EPFX, output);
+    va_start (ap, fmt);
+    vfprintf (output, fmt, ap);
+    va_end (ap);
+    fputc ('\n', output);
 
-  return 1;
+    return 1;
 }
 
 /*------------------------------------------------------------------------*/
 
-  inline static int
+inline static int
 next_non_white_space_char_ignoring_comments (void)
 {
-  int ch;
+    int ch;
 
 SKIP_WHITE_SPACE_AND_COMMENTS:
 
-  ch = next_char ();
-  if (isspace (ch))
-    goto SKIP_WHITE_SPACE_AND_COMMENTS;
+    ch = next_char ();
+    if (isspace (ch))
+        goto SKIP_WHITE_SPACE_AND_COMMENTS;
 
-  if (ch == 'c')
-  {
-    while ((ch = next_char ()) != '\n' && ch != EOF)
-      ;
+    if (ch == 'c') {
+        while ((ch = next_char ()) != '\n' && ch != EOF)
+            ;
 
-    if (ch == '\n')
-      goto SKIP_WHITE_SPACE_AND_COMMENTS;
-  }
+        if (ch == '\n')
+            goto SKIP_WHITE_SPACE_AND_COMMENTS;
+    }
 
-  return ch;
+    return ch;
 }
 
 /*------------------------------------------------------------------------*/
 
-  inline static int
+inline static int
 next_int (void)
 {
-  int ch, res, sign, digit;
+    int ch, res, sign, digit;
 
-  ch = next_non_white_space_char_ignoring_comments ();
+    ch = next_non_white_space_char_ignoring_comments ();
 
-  if (ch == EOF)
-    return DONE;
+    if (ch == EOF)
+        return DONE;
 
-  last_token_lineno = current_lineno;
+    last_token_lineno = current_lineno;
 
-  sign = 1;
-  if (ch == '-')
-  {
-    sign = -1;
+    sign = 1;
+    if (ch == '-') {
+        sign = -1;
+        ch = next_char ();
+    }
+
+    if (!isdigit (ch)) {
+        if (isprint (ch))
+            return scan_error ("expected digit or '-' but got '%c'", ch);
+        else
+            return scan_error ("expected digit or '-' but got 0x%x", ch);
+    }
+
+    res = ch - '0';
+
     ch = next_char ();
-  }
+    while (isdigit (ch)) {
+        if (res > (MAX_IDX / 10))
+NUMBER_TOO_LARGE:
+            return scan_error ("number too large");
 
-  if (!isdigit (ch))
-  {
-    if (isprint (ch))
-      return scan_error ("expected digit or '-' but got '%c'", ch);
-    else
-      return scan_error ("expected digit or '-' but got 0x%x", ch);
-  }
+        res *= 10;
+        digit = ch - '0';
 
-  res = ch - '0';
+        if (res > MAX_IDX - digit)
+            goto NUMBER_TOO_LARGE;
 
-  ch = next_char ();
-  while (isdigit (ch))
-  {
-    if (res > (MAX_IDX / 10))
-      NUMBER_TOO_LARGE:
-        return scan_error ("number too large");
+        res += digit;
+        ch = next_char ();
+    }
 
-    res *= 10;
-    digit = ch - '0';
+    if (ch != EOF && !isspace (ch))
+        return scan_error ("expected EOF or white space after number");
 
-    if (res > MAX_IDX - digit)
-      goto NUMBER_TOO_LARGE;
+    res *= sign;
 
-    res += digit;
-    ch = next_char ();
-  }
-
-  if (ch != EOF && !isspace (ch))
-    return scan_error ("expected EOF or white space after number");
-
-  res *= sign;
-
-  return res;
+    return res;
 }
 
 /*------------------------------------------------------------------------*/
 
-  inline static int
+inline static int
 is_valid_clause_idx (int idx)
 {
-  if (idx <= 0)
-    return 0;
+    if (idx <= 0)
+        return 0;
 
-  return idx < size_clauses;
+    return idx < size_clauses;
 }
 
 /*------------------------------------------------------------------------*/
 
-  inline static Clause *
+inline static Clause *
 idx2clause (int idx)
 {
-  if (!is_valid_clause_idx (idx))
-    return 0;
+    if (!is_valid_clause_idx (idx))
+        return 0;
 
-  return clauses[idx];
+    return clauses[idx];
 }
 
 /*------------------------------------------------------------------------*/
 
-  static int
+static int
 parse_zero_terminated_list_of_numbers (int only_positive_indices)
 {
-  int n;
+    int n;
 
-  assert (!count_stack);
+    assert (!count_stack);
 
 NEXT_NUMBER:
-  n = next_int ();
+    n = next_int ();
 
-  if (n == DONE)
-    return parse_error ("no zero before EOF");
+    if (n == DONE)
+        return parse_error ("no zero before EOF");
 
-  if (n == ERROR)
-    return 0;
+    if (n == ERROR)
+        return 0;
 
-  if (!n)
-    return 1;
+    if (!n)
+        return 1;
 
-  if (only_positive_indices && n < 0)
-    return parse_error ("expected positive number");
+    if (only_positive_indices && n < 0)
+        return parse_error ("expected positive number");
 
-  push_stack (n);
+    push_stack (n);
 
-  goto NEXT_NUMBER;
+    goto NEXT_NUMBER;
 }
 
 /*------------------------------------------------------------------------*/
 
-  static int *
+static int *
 copy_ints (int * start, int count)
 {
-  int *res, i, tmp;
+    int *res, i, tmp;
 
-  BOOLEFORCE_NEW_ARRAY (res, count + 1);
-  for (i = 0; i < count; i++)
-  {
-    tmp = start[i];
-    assert (tmp);
-    res[i] = tmp;
-  }
+    BOOLEFORCE_NEW_ARRAY (res, count + 1);
+    for (i = 0; i < count; i++) {
+        tmp = start[i];
+        assert (tmp);
+        res[i] = tmp;
+    }
 
-  res[count] = 0;
+    res[count] = 0;
 
-  return res;
+    return res;
 }
 
 /*------------------------------------------------------------------------*/
 
-  static int *
+static int *
 copy_stack (void)
 {
-  int * res;
-  res = copy_ints (stack, count_stack);
-  count_stack = 0;
-  return res;
+    int * res;
+    res = copy_ints (stack, count_stack);
+    count_stack = 0;
+    return res;
 }
 
 /*------------------------------------------------------------------------*/
 
-  static int *
+static int *
 copy_labels (void)
 {
-  int * res;
-  res = copy_ints (labels, count_labels);
-  count_labels = 0;
-  return res;
+    int * res;
+    res = copy_ints (labels, count_labels);
+    count_labels = 0;
+    return res;
 }
 
 /*------------------------------------------------------------------------*/
 
-  static int
+static int
 parse_ascii (void)
 {
-  int ch, idx, idx_lineno, *literals, *antecedents, *p, lit;
-  Clause /**clause, */*other;
+    int ch, idx, idx_lineno, *literals, *antecedents, *p, lit;
+    Clause *other;
 
 NEXT_CLAUSE:
-  idx = next_int ();
+    idx = next_int ();
 
-  if (idx == ERROR)
-    return 0;
+    if (idx == ERROR)
+        return 0;
 
-  if (idx == DONE)
-    return 1;
+    if (idx == DONE)
+        return 1;
 
-  if (idx < 0)
-    return parse_error ("negative clause index");
+    if (idx < 0)
+        return parse_error ("negative clause index");
 
-  if (!idx)
-    return parse_error ("zero clause index");
+    if (!idx)
+        return parse_error ("zero clause index");
 
-  if ((other = idx2clause (idx)))
-    return parse_error ("clause %d already defined at line %d",
-        idx, other->lineno);
+    if ((other = idx2clause (idx)))
+        return parse_error ("clause %d already defined at line %d",
+                            idx, other->lineno);
 
-  idx_lineno = last_token_lineno;
+    idx_lineno = last_token_lineno;
 
-  ch = next_non_white_space_char_ignoring_comments ();
+    ch = next_non_white_space_char_ignoring_comments ();
 
-  if (ch != '*')
-  {
-    put_back_char (ch);
-    if (!parse_zero_terminated_list_of_numbers (0))
-      return 0;
+    if (ch != '*') {
+        put_back_char (ch);
+        if (!parse_zero_terminated_list_of_numbers (0))
+            return 0;
 
-    literals = copy_stack ();
-  }
-  else
-    literals = 0;
+        literals = copy_stack ();
+    } else
+        literals = 0;
 
-  if (!parse_zero_terminated_list_of_numbers (1))
-  {
-    BOOLEFORCE_DELETE_ARRAY (literals, length_ints (literals) + 1);
-    return 0;
-  }
-
-  // Note: delete parsed literals if there are antecedents
-  // We have to enter collect_literals for labelling, so we only support '*'
-  // literal lists for internal vertices
-  // TODO Maybe allow labelling through input file, then this could be changed
-  if (count_stack)
-  {
-    if (literals)
-      BOOLEFORCE_DELETE_ARRAY (literals, length_ints (literals) + 1);
-    literals = 0;
-    antecedents = copy_stack ();
-  } else
-    antecedents = 0;
-
-  if (!literals && !antecedents)
-    return parse_error ("original clause without literals");
-
-  if (original_cnf_file_name)
-  {
-    if (antecedents && idx <= original_clauses)
-      return parse_error ("derived clause index %d too small", idx);
-
-    if (!antecedents && idx > original_clauses)
-      return parse_error ("original clause index %d too large", idx);
-
-    if (literals)
-    {
-      for (p = literals; (lit = *p); p++)
-        if (abs (lit) > original_variables)
-          return parse_error ("literal %d too large", lit);
+    if (!parse_zero_terminated_list_of_numbers (1)) {
+        BOOLEFORCE_DELETE_ARRAY (literals, length_ints (literals) + 1);
+        return 0;
     }
-  }
 
-  /*clause = */add_clause (idx, literals, antecedents, idx_lineno);
+    // Note: delete parsed literals if there are antecedents
+    // We have to enter collect_literals for labelling, so we only support '*'
+    // literal lists for internal vertices
+    // TODO Maybe allow labelling through input file, then this could be changed
+    if (count_stack) {
+        if (literals)
+            BOOLEFORCE_DELETE_ARRAY (literals, length_ints (literals) + 1);
+        literals = 0;
+        antecedents = copy_stack ();
+    } else
+        antecedents = 0;
 
-  goto NEXT_CLAUSE;
+    if (!literals && !antecedents)
+        return parse_error ("original clause without literals");
+
+    if (original_cnf_file_name) {
+        if (antecedents && idx <= original_clauses)
+            return parse_error ("derived clause index %d too small", idx);
+
+        if (!antecedents && idx > original_clauses)
+            return parse_error ("original clause index %d too large", idx);
+
+        if (literals) {
+            for (p = literals; (lit = *p); p++)
+                if (abs (lit) > original_variables)
+                    return parse_error ("literal %d too large", lit);
+        }
+    }
+
+    (void) add_clause (idx, literals, antecedents, idx_lineno);
+
+    goto NEXT_CLAUSE;
 }
 
 /*------------------------------------------------------------------------*/
 
-  static const char *
+static const char *
 format2str (Format f)
 {
-  switch (f)
-  {
+    switch (f) {
     case ASCII_FORMAT:
-      return "ascii";
+        return "ascii";
     case BINARY_FORMAT:
-      return "binary";
+        return "binary";
     default:
-      break;
-  }
+        break;
+    }
 
-  assert (f == COMPRESSED_FORMAT);
+    assert (f == COMPRESSED_FORMAT);
 
-  return "compressed";
+    return "compressed";
 }
 
 /*------------------------------------------------------------------------*/
 
-  static int
+static int
 parse_header (void)
 {
-  int ch;
+    int ch;
 
-  ch = next_non_white_space_char_ignoring_comments ();
+    ch = next_non_white_space_char_ignoring_comments ();
 
-  if (ch == EOF)
-  {
-    if (verbose)
-      LOG ("empty trace file");
+    if (ch == EOF) {
+        if (verbose)
+            LOG ("empty trace file");
 
-    format = ASCII_FORMAT;
-    return 1;
-  }
-  else if (ch == 'p')
-  {
-    ch = next_char ();
-    if (!isspace (ch))
-      EXPECTED_WHITE_SPACE:
-        return parse_error ("expected white space");
-
-    while ((ch = next_char ()) == ' ')
-      ;
-
-    switch (ch)
-    {
-      case 'a':
-        if (next_char () != 's' ||
-            next_char () != 'c' ||
-            next_char () != 'i' || next_char () != 'i')
-          goto INVALID_FORMAT_ERROR;
         format = ASCII_FORMAT;
-        break;
-      case 'b':
-        if (next_char () != 'i' ||
-            next_char () != 'n' ||
-            next_char () != 'a' ||
-            next_char () != 'r' || next_char () != 'y')
-          goto INVALID_FORMAT_ERROR;
-        format = BINARY_FORMAT;
-        break;
-      case 'c':
-        if (next_char () != 'i' ||
-            next_char () != 'n' ||
-            next_char () != 'a' ||
-            next_char () != 'r' || next_char () != 'y')
-          goto INVALID_FORMAT_ERROR;
-        format = COMPRESSED_FORMAT;
-        break;
-      default:
+        return 1;
+    } else if (ch == 'p') {
+        ch = next_char ();
+        if (!isspace (ch))
+EXPECTED_WHITE_SPACE:
+            return parse_error ("expected white space");
+
+        while ((ch = next_char ()) == ' ')
+            ;
+
+        switch (ch) {
+        case 'a':
+            if (next_char () != 's' ||
+                    next_char () != 'c' ||
+                    next_char () != 'i' || next_char () != 'i')
+                goto INVALID_FORMAT_ERROR;
+            format = ASCII_FORMAT;
+            break;
+        case 'b':
+            if (next_char () != 'i' ||
+                    next_char () != 'n' ||
+                    next_char () != 'a' ||
+                    next_char () != 'r' || next_char () != 'y')
+                goto INVALID_FORMAT_ERROR;
+            format = BINARY_FORMAT;
+            break;
+        case 'c':
+            if (next_char () != 'i' ||
+                    next_char () != 'n' ||
+                    next_char () != 'a' ||
+                    next_char () != 'r' || next_char () != 'y')
+                goto INVALID_FORMAT_ERROR;
+            format = COMPRESSED_FORMAT;
+            break;
+        default:
 INVALID_FORMAT_ERROR:
-        return parse_error ("expected format: ascii, binary, compressed");
+            return parse_error ("expected format: ascii, binary, compressed");
+        }
+
+        if ((ch = next_char ()) != ' ')
+            goto EXPECTED_WHITE_SPACE;
+
+        while ((ch = next_char ()) == ' ')
+            ;
+
+        if (ch != 't' ||
+                next_char () != 'r' ||
+                next_char () != 'a' || next_char () != 'c' || next_char () != 'e')
+            return parse_error ("expected 'trace'");
+
+        while ((ch = next_char ()) == ' ')
+            ;
+
+        if (ch != EOF && ch != '\n')
+            return parse_error ("expected new line or EOF after 'trace'");
+
+        return 1;
+    } else if (ch != '-' && !isdigit (ch))
+        return parse_error ("expected 'p' or digit");
+    else {
+        if (verbose)
+            LOG ("format header missing");
+
+        format = ASCII_FORMAT;
+        put_back_char (ch);
+        return 1;
     }
-
-    if ((ch = next_char ()) != ' ')
-      goto EXPECTED_WHITE_SPACE;
-
-    while ((ch = next_char ()) == ' ')
-      ;
-
-    if (ch != 't' ||
-        next_char () != 'r' ||
-        next_char () != 'a' || next_char () != 'c' || next_char () != 'e')
-      return parse_error ("expected 'trace'");
-
-    while ((ch = next_char ()) == ' ')
-      ;
-
-    if (ch != EOF && ch != '\n')
-      return parse_error ("expected new line or EOF after 'trace'");
-
-    return 1;
-  }
-  else if (ch != '-' && !isdigit (ch))
-    return parse_error ("expected 'p' or digit");
-  else
-  {
-    if (verbose)
-      LOG ("format header missing");
-
-    format = ASCII_FORMAT;
-    put_back_char (ch);
-    return 1;
-  }
 }
 
 /*------------------------------------------------------------------------*/
@@ -1115,206 +1096,197 @@ INVALID_FORMAT_ERROR:
 
 /*------------------------------------------------------------------------*/
 
-  static int
+static int
 parse (void)
 {
-  double start_time = booleforce_time_stamp ();
-  int num_clauses, num_literals;
-  int res;
+    double start_time = booleforce_time_stamp ();
+    int num_clauses, num_literals;
+    int res;
 
-  if (verbose)
-    LOG ("parsing %s", input_name);
+    if (verbose)
+        LOG ("parsing %s", input_name);
 
-  current_lineno = 1;
-  previous_char = EOF;
+    current_lineno = 1;
+    previous_char = EOF;
 
-  if (!parse_header ())
-    return 0;
+    if (!parse_header ())
+        return 0;
 
-  if (verbose)
-    LOG ("%s trace", format2str (format));
+    if (verbose)
+        LOG ("%s trace", format2str (format));
 
-  res = 0;
+    res = 0;
 
-  if (format == BINARY_FORMAT)
-    return parse_error ("parsing of binary traces not implemented yet");
-  else if (format == COMPRESSED_FORMAT)
-    return parse_error ("parsing of compressed traces not implemented yet");
-  else
-  {
-    assert (format == ASCII_FORMAT);
-    res = parse_ascii ();
-  }
+    if (format == BINARY_FORMAT)
+        return parse_error ("parsing of binary traces not implemented yet");
+    else if (format == COMPRESSED_FORMAT)
+        return parse_error ("parsing of compressed traces not implemented yet");
+    else {
+        assert (format == ASCII_FORMAT);
+        res = parse_ascii ();
+    }
 
-  if (res && verbose)
-  {
-    num_clauses = num_original_clauses + num_derived_clauses;
-    num_literals = num_original_literals + num_derived_literals;
+    if (res && verbose) {
+        num_clauses = num_original_clauses + num_derived_clauses;
+        num_literals = num_original_literals + num_derived_literals;
 
-    LOG ("   original: %9d clauses %10d literals    %7.1f/clause",
-        num_original_clauses,
-        num_original_literals,
-        AVG (num_original_literals, num_original_clauses));
-    LOG ("    derived: %9d clauses %10d literals    %7.1f/clause",
-        num_derived_clauses,
-        num_derived_literals,
-        AVG (num_derived_literals, num_derived_clauses));
-    LOG ("        all: %9d clauses %10d literals    %7.1f/clause",
-        num_clauses, num_literals, AVG (num_literals, num_clauses));
-    LOG ("antecedents:             %16d antecedents %7.1f/chain",
-        num_antecedents, AVG (num_antecedents, num_derived_clauses));
+        LOG ("   original: %9d clauses %10d literals    %7.1f/clause",
+             num_original_clauses,
+             num_original_literals,
+             AVG (num_original_literals, num_original_clauses));
+        LOG ("    derived: %9d clauses %10d literals    %7.1f/clause",
+             num_derived_clauses,
+             num_derived_literals,
+             AVG (num_derived_literals, num_derived_clauses));
+        LOG ("        all: %9d clauses %10d literals    %7.1f/clause",
+             num_clauses, num_literals, AVG (num_literals, num_clauses));
+        LOG ("antecedents:             %16d antecedents %7.1f/chain",
+             num_antecedents, AVG (num_antecedents, num_derived_clauses));
 
-    LOG ("found %d empty clause%s",
-        num_empty_clauses, num_empty_clauses == 1 ? "" : "s");
+        LOG ("found %d empty clause%s",
+             num_empty_clauses, num_empty_clauses == 1 ? "" : "s");
 
-    booleforce_report (start_time, output, VPFX "parsed %s", input_name);
-  }
+        booleforce_report (start_time, output, VPFX "parsed %s", input_name);
+    }
 
-  return res;
+    return res;
 }
 
 /*------------------------------------------------------------------------*/
 
-  static int
+static int
 link_clause (Clause * clause)
 {
-  int *p, idx;
+    int *p, idx;
 
-  assert (clause);
-  assert (clause->antecedents);
+    assert (clause);
+    assert (clause->antecedents);
 
-  for (p = clause->antecedents; (idx = *p); p++)
-    if (!idx2clause (idx))
-      return check_error ("clause %d used in clause %d is undefined",
-          idx, clause->idx);
+    for (p = clause->antecedents; (idx = *p); p++)
+        if (!idx2clause (idx))
+            return check_error ("clause %d used in clause %d is undefined",
+                                idx, clause->idx);
 
-  return 1;
+    return 1;
 }
 
 /*------------------------------------------------------------------------*/
 /* Check that all mentionend antecedents are indeed defined.
  */
-  static int
+static int
 link_derived_clauses (void)
 {
-  double start_time = booleforce_time_stamp ();
-  Clause **p, **end, *clause;
-  int count;
+    double start_time = booleforce_time_stamp ();
+    Clause **p, **end, *clause;
+    int count;
 
-  count = 0;
-  end = clauses + size_clauses;
-  for (p = clauses + 1; p < end; p++)
-  {
-    if ((clause = *p))
-    {
-      if (!clause->antecedents)
-        continue;
+    count = 0;
+    end = clauses + size_clauses;
+    for (p = clauses + 1; p < end; p++) {
+        if ((clause = *p)) {
+            if (!clause->antecedents)
+                continue;
 
-      count++;
-      if (!link_clause (clause))
-        return 0;
+            count++;
+            if (!link_clause (clause))
+                return 0;
+        }
     }
-  }
 
-  if (verbose)
-    booleforce_report (start_time, output, VPFX "linked %d clauses", count);
+    if (verbose)
+        booleforce_report (start_time, output, VPFX "linked %d clauses", count);
 
-  return 1;
+    return 1;
 }
 
 /*------------------------------------------------------------------------*/
 
-  static int
+static int
 color_clause (Clause * clause)
 {
-  int * p, lit;
-  if (clause->antecedents)
-    return check_error ("clause has antecedents");
+    int * p, lit;
+    if (clause->antecedents)
+        return check_error ("clause has antecedents");
 
-  for (p = clause->literals; (lit = *p); p++)
-  {
-    short label = clause->partition;
-    push_labels(label);
-  }
-  clause->labels = copy_labels();
+    for (p = clause->literals; (lit = *p); p++) {
+        short label = clause->partition;
+        push_labels(label);
+    }
+    clause->labels = copy_labels();
 
-  return 1;
+    return 1;
 }
 
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 find_roots (void)
 {
-  double start_time = booleforce_time_stamp ();
-  Clause *clause, *other;
-  Clause **p, **end;
-  int *q, idx;
+    double start_time = booleforce_time_stamp ();
+    Clause *clause, *other;
+    Clause **p, **end;
+    int *q, idx;
 
-  /* First mark all clauses that are used in an antecedent.
-   */
-  end = clauses + size_clauses;
-  for (p = clauses + 1; p < end; p++)
-  {
-    clause = *p;
+    /* First mark all clauses that are used in an antecedent.
+     */
+    end = clauses + size_clauses;
+    for (p = clauses + 1; p < end; p++) {
+        clause = *p;
 
-    if (!clause)
-      continue;
+        if (!clause)
+            continue;
 
-    if (!clause->antecedents)
-      continue;
+        if (!clause->antecedents)
+            continue;
 
-    for (q = clause->antecedents; (idx = *q); q++)
-    {
-      other = idx2clause (idx);
-      assert (other);
+        for (q = clause->antecedents; (idx = *q); q++) {
+            other = idx2clause (idx);
+            assert (other);
 
-      if (other->antecedents)
-        other->mark = 1;
-    }
-  }
-
-  /* Collect unmarked derived clauses as roots.
-   */
-  for (p = clauses + 1; p < end; p++)
-  {
-    clause = *p;
-
-    if (!clause)
-      continue;
-
-    if (!clause->antecedents)
-      continue;
-
-    if (clause->mark)
-    {
-      clause->mark = 0;
-      continue;
+            if (other->antecedents)
+                other->mark = 1;
+        }
     }
 
-    push_roots (clause->idx);
+    /* Collect unmarked derived clauses as roots.
+     */
+    for (p = clauses + 1; p < end; p++) {
+        clause = *p;
+
+        if (!clause)
+            continue;
+
+        if (!clause->antecedents)
+            continue;
+
+        if (clause->mark) {
+            clause->mark = 0;
+            continue;
+        }
+
+        push_roots (clause->idx);
 #ifdef BOOLEFORCE_LOG
-    if (clause->literals && verbose > 1)
-      LOG ("found root%s %d",
-          clause->literals[0] ? "" : " empty clause", clause->idx);
+        if (clause->literals && verbose > 1)
+            LOG ("found root%s %d",
+                 clause->literals[0] ? "" : " empty clause", clause->idx);
 #endif
-  }
+    }
 
-  if (verbose)
-    booleforce_report (start_time, output,
-        VPFX "found %d derived root clause%s",
-        count_roots, count_roots == 1 ? "" : "s");
+    if (verbose)
+        booleforce_report (start_time, output,
+                           VPFX "found %d derived root clause%s",
+                           count_roots, count_roots == 1 ? "" : "s");
 }
 
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 copy_roots (void)
 {
-  int *p;
-  assert (!count_stack);
-  for (p = roots; p < roots + count_roots; p++)
-    push_stack (*p);
+    int *p;
+    assert (!count_stack);
+    for (p = roots; p < roots + count_roots; p++)
+        push_stack (*p);
 }
 
 /*------------------------------------------------------------------------*/
@@ -1327,125 +1299,118 @@ copy_roots (void)
  * dependency between these clauses necessarily is cyclic and is reported as
  * an error.
  */
-  static int
+static int
 collect (void)
 {
-  int *p, mark_original_clauses, mark_derived_clauses, idx;
-  double start_time = booleforce_time_stamp ();
-  Clause *clause;
+    int *p, mark_original_clauses, mark_derived_clauses, idx;
+    double start_time = booleforce_time_stamp ();
+    Clause *clause;
 
-  assert (!first_in_order);
-  mark_derived_clauses = mark_original_clauses = 0;
+    assert (!first_in_order);
+    mark_derived_clauses = mark_original_clauses = 0;
 
-  copy_roots ();
+    copy_roots ();
 
-  while (count_stack)
-  {
-    idx = pop_stack ();
-    clause = idx2clause (idx);
-    assert (clause);
+    while (count_stack) {
+        idx = pop_stack ();
+        clause = idx2clause (idx);
+        assert (clause);
 
-    if (clause->mark)
-      continue;
+        if (clause->mark)
+            continue;
 
-    clause->next_in_order = first_in_order;
-    first_in_order = clause;
+        clause->next_in_order = first_in_order;
+        first_in_order = clause;
 
-    clause->mark = 1;
+        clause->mark = 1;
 
-    if (clause->antecedents)
-    {
-      for (p = clause->antecedents; *p; p++)
-        push_stack (*p);
+        if (clause->antecedents) {
+            for (p = clause->antecedents; *p; p++)
+                push_stack (*p);
 
-      mark_derived_clauses++;
+            mark_derived_clauses++;
+        } else
+            mark_original_clauses++;
     }
-    else
-      mark_original_clauses++;
-  }
 
-  for (idx = 1; idx < size_clauses; idx++)
-  {
-    clause = clauses[idx];
+    for (idx = 1; idx < size_clauses; idx++) {
+        clause = clauses[idx];
 
-    if (!clause)
-      continue;
+        if (!clause)
+            continue;
 
-    if (!clause->antecedents)
-      continue;
+        if (!clause->antecedents)
+            continue;
 
-    if (!clause->mark)
-      return check_error ("clause %d has a cyclic dependency", idx);
-  }
+        if (!clause->mark)
+            return check_error ("clause %d has a cyclic dependency", idx);
+    }
 
-  for (clause = first_in_order; clause; clause = clause->next_in_order)
-    clause->mark = 0;
+    for (clause = first_in_order; clause; clause = clause->next_in_order)
+        clause->mark = 0;
 
-  if (verbose)
-    booleforce_report (start_time, output,
-        VPFX "collected %d original and %d derived clauses",
-        mark_original_clauses, mark_derived_clauses);
+    if (verbose)
+        booleforce_report (start_time, output,
+                           VPFX "collected %d original and %d derived clauses",
+                           mark_original_clauses, mark_derived_clauses);
 
-  return 1;
+    return 1;
 }
 
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 unmark_clauses (void)
 {
-  Clause *p;
+    Clause *p;
 
-  for (p = first_in_order; p; p = p->next_in_order)
-    p->mark = 0;
+    for (p = first_in_order; p; p = p->next_in_order)
+        p->mark = 0;
 }
 
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 reverse_clauses (void)
 {
-  Clause *prev, *this, *next_in_order;
+    Clause *prev, *this, *next_in_order;
 
-  prev = 0;
-  this = first_in_order;
-  while (this)
-  {
-    next_in_order = this->next_in_order;
-    this->next_in_order = prev;
-    prev = this;
-    this = next_in_order;
-  }
-  first_in_order = prev;
+    prev = 0;
+    this = first_in_order;
+    while (this) {
+        next_in_order = this->next_in_order;
+        this->next_in_order = prev;
+        prev = this;
+        this = next_in_order;
+    }
+    first_in_order = prev;
 }
 
 /*------------------------------------------------------------------------*/
 #ifndef NDEBUG
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 check_topologically_sorted (void)
 {
-  Clause *p, *antecedent;
-  int *q, idx, order;
+    Clause *p, *antecedent;
+    int *q, idx, order;
 
-  order = 0;
-  for (p = first_in_order; p; p = p->next_in_order)
-    p->mark = order++;
+    order = 0;
+    for (p = first_in_order; p; p = p->next_in_order)
+        p->mark = order++;
 
-  for (p = first_in_order; p; p = p->next_in_order)
-  {
-    if (!p->antecedents)
-      continue;
+    for (p = first_in_order; p; p = p->next_in_order) {
+        if (!p->antecedents)
+            continue;
 
-    for (q = p->antecedents; (idx = *q); q++)
-    {
-      antecedent = idx2clause (idx);
-      assert (antecedent->mark < p->mark);
+        for (q = p->antecedents; (idx = *q); q++) {
+            antecedent = idx2clause (idx);
+            assert (antecedent->mark < p->mark);
+        }
     }
-  }
 
-  unmark_clauses ();
+    unmark_clauses ();
 }
 
 /*------------------------------------------------------------------------*/
@@ -1486,277 +1451,260 @@ check_topologically_sorted (void)
  * et.al. though I have not found a description of the non-recursive
  * version implemented here anywhere.
  */
-  static int
+static int
 order (void)
 {
-  int *p, clause_idx, antecedent_idx;
-  double start_time = booleforce_time_stamp ();
-  Clause *clause, *antecedent;
+    int *p, clause_idx, antecedent_idx;
+    double start_time = booleforce_time_stamp ();
+    Clause *clause, *antecedent;
 
-  first_in_order = 0;
+    first_in_order = 0;
 
-  copy_roots ();
+    copy_roots ();
 
-  while (count_stack)
-  {
-    clause_idx = pop_stack ();
+    while (count_stack) {
+        clause_idx = pop_stack ();
 
-    if (clause_idx)
-    {
-      clause = idx2clause (clause_idx);
+        if (clause_idx) {
+            clause = idx2clause (clause_idx);
 
-      if (clause->mark == 2)
-        continue;
+            if (clause->mark == 2)
+                continue;
 
-      if (clause->mark == 1)
-      {
-        /* This is the only place where we need the 'dfs_tree_parent'
-         * file, which can be optimized away if this error message is
-         * not too cumbersome otherwise.
-         */
-        assert (clause->dfs_tree_parent);
-        return
-          check_error ("clause %d depends recursively on clause %d",
-              clause->dfs_tree_parent->idx, clause->idx);
-      }
+            if (clause->mark == 1) {
+                /* This is the only place where we need the 'dfs_tree_parent'
+                 * file, which can be optimized away if this error message is
+                 * not too cumbersome otherwise.
+                 */
+                assert (clause->dfs_tree_parent);
+                return
+                    check_error ("clause %d depends recursively on clause %d",
+                                 clause->dfs_tree_parent->idx, clause->idx);
+            }
 
-      clause->mark = 1;
+            clause->mark = 1;
 
-      /* Clauses without antecedents (leaves in the DFS) can be post
-       * processed immediately.
-       */
-      if (!clause->antecedents)
-        goto POSTFIX_PROCESSING;
+            /* Clauses without antecedents (leaves in the DFS) can be post
+             * processed immediately.
+             */
+            if (!clause->antecedents)
+                goto POSTFIX_PROCESSING;
 
-      push_stack (clause_idx);
-      push_stack (0);
+            push_stack (clause_idx);
+            push_stack (0);
 
-      assert (clause->antecedents);
-      for (p = clause->antecedents; (antecedent_idx = *p); p++)
-      {
-        antecedent = idx2clause (antecedent_idx);
-        antecedent->dfs_tree_parent = clause;
-        push_stack (antecedent_idx);
-      }
-    }
-    else
-    {
-      assert (count_stack);
-      clause_idx = pop_stack ();
-      clause = idx2clause (clause_idx);
+            assert (clause->antecedents);
+            for (p = clause->antecedents; (antecedent_idx = *p); p++) {
+                antecedent = idx2clause (antecedent_idx);
+                antecedent->dfs_tree_parent = clause;
+                push_stack (antecedent_idx);
+            }
+        } else {
+            assert (count_stack);
+            clause_idx = pop_stack ();
+            clause = idx2clause (clause_idx);
 
 POSTFIX_PROCESSING:
-      clause->next_in_order = first_in_order;
-      first_in_order = clause;
+            clause->next_in_order = first_in_order;
+            first_in_order = clause;
 
-      clause->mark = 2;
+            clause->mark = 2;
+        }
     }
-  }
 
-  unmark_clauses ();
-  reverse_clauses ();
+    unmark_clauses ();
+    reverse_clauses ();
 #ifndef NDEBUG
-  check_topologically_sorted ();
+    check_topologically_sorted ();
 #endif
-  if (verbose)
-    booleforce_report (start_time, output,
-        VPFX "topologically sorted chains");
+    if (verbose)
+        booleforce_report (start_time, output,
+                           VPFX "topologically sorted chains");
 
-  return 1;
+    return 1;
 }
 
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 init_aigs (void)
 {
-  int lit;
-  for (lit = 1; lit <= max_lit_idx; lit++)
-  {
-    literals[lit].aig = simpaig_var (mgr, literals + lit, 0);
-    literals[lit].idx = lit;
-    literals[-lit].aig = simpaig_not (literals[lit].aig);
-    literals[-lit].idx = lit;
-  }
+    int lit;
+    for (lit = 1; lit <= max_lit_idx; lit++) {
+        literals[lit].aig = simpaig_var (mgr, literals + lit, 0);
+        literals[lit].idx = lit;
+        literals[-lit].aig = simpaig_not (literals[lit].aig);
+        literals[-lit].idx = lit;
+    }
 }
 
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 init_literals (void)
 {
-  double start_time = booleforce_time_stamp ();
-  Clause *clause;
-  int *p, idx;
+    double start_time = booleforce_time_stamp ();
+    Clause *clause;
+    int *p, idx;
 
-  max_lit_idx = 0;
+    max_lit_idx = 0;
 
-  for (clause = first_in_order; clause; clause = clause->next_in_order)
-  {
-    if (!clause->literals)
-      continue;
+    for (clause = first_in_order; clause; clause = clause->next_in_order) {
+        if (!clause->literals)
+            continue;
 
-    if (!clause->antecedents)
-    {
-      if (clause->idx <= partition_split)
-      {
-        clause->partition = A;
-        clause->itp = simpaig_false (mgr);
-      }
-      else
-      {
-        clause->partition = B;
-        clause->itp = simpaig_true (mgr);
-      }
+        if (!clause->antecedents) {
+            if (clause->idx <= partition_split) {
+                clause->partition = A;
+                clause->itp = simpaig_false (mgr);
+            } else {
+                clause->partition = B;
+                clause->itp = simpaig_true (mgr);
+            }
 
-      color_clause(clause);
+            color_clause(clause);
+        }
+
+        for (p = clause->literals; (idx = *p); p++) {
+            if (idx < 0)
+                idx = -idx;
+
+            if (idx > max_lit_idx)
+                max_lit_idx = idx;
+        }
     }
 
-    for (p = clause->literals; (idx = *p); p++)
-    {
-      if (idx < 0)
-        idx = -idx;
-
-      if (idx > max_lit_idx)
-        max_lit_idx = idx;
-    }
-  }
-
-  BOOLEFORCE_NEW_ARRAY (literals, 2 * max_lit_idx + 1);
-  // Note: set pointer to the middle of the range
-  literals += max_lit_idx;
+    BOOLEFORCE_NEW_ARRAY (literals, 2 * max_lit_idx + 1);
+    // Note: set pointer to the middle of the range
+    literals += max_lit_idx;
 
 #ifndef NDEBUG
-  /* A valid position denotes a valid index in a stack.  Therefore a
-   * negative position means undefined.
-   */
-  for (idx = -max_lit_idx; idx <= max_lit_idx; idx++)
-  {
-    Literal * lit = literals + idx;
-    assert (lit->mark == 0);
-  }
+    /* A valid position denotes a valid index in a stack.  Therefore a
+     * negative position means undefined.
+     */
+    for (idx = -max_lit_idx; idx <= max_lit_idx; idx++) {
+        Literal * lit = literals + idx;
+        assert (lit->mark == 0);
+    }
 #endif
 
-  if (verbose)
-    booleforce_report (start_time, output,
-        VPFX "initialized literals with maximal index %d",
-        max_lit_idx);
+    if (verbose)
+        booleforce_report (start_time, output,
+                           VPFX "initialized literals with maximal index %d",
+                           max_lit_idx);
 }
 
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 init_cells (void)
 {
-  double start_time = booleforce_time_stamp ();
-  Clause *clause;
-  int tmp, i;
+    double start_time = booleforce_time_stamp ();
+    Clause *clause;
+    int tmp, i;
 
-  max_antecedents = 0;
+    max_antecedents = 0;
 
-  for (clause = first_in_order; clause; clause = clause->next_in_order)
-  {
-    if (!clause->antecedents)
-      continue;
+    for (clause = first_in_order; clause; clause = clause->next_in_order) {
+        if (!clause->antecedents)
+            continue;
 
-    tmp = length_ints (clause->antecedents);
-    if (tmp > max_antecedents)
-      max_antecedents = tmp;
-  }
+        tmp = length_ints (clause->antecedents);
+        if (tmp > max_antecedents)
+            max_antecedents = tmp;
+    }
 
-  /* We watch at most '2 * max_antecedents' literals.  Since recycling of a
-   * cell is done after moving the watch and thus allocating a new cell, we
-   * need to preallocate one more cell than the maximum number of watched
-   * literals.
-   */
-  size_cells = 2 * max_antecedents + 1;
-  BOOLEFORCE_NEW_ARRAY (cells, size_cells);
+    /* We watch at most '2 * max_antecedents' literals.  Since recycling of a
+     * cell is done after moving the watch and thus allocating a new cell, we
+     * need to preallocate one more cell than the maximum number of watched
+     * literals.
+     */
+    size_cells = 2 * max_antecedents + 1;
+    BOOLEFORCE_NEW_ARRAY (cells, size_cells);
 
-  for (i = 0; i < size_cells; i++)
-    recycle_cell (cells + i);
+    for (i = 0; i < size_cells; i++)
+        recycle_cell (cells + i);
 
-  if (verbose)
-    booleforce_report (start_time, output,
-        VPFX "maximal %d antecedents", max_antecedents);
+    if (verbose)
+        booleforce_report (start_time, output,
+                           VPFX "maximal %d antecedents", max_antecedents);
 }
 
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 mark_literals (int *zero_terminated_array, int mark)
 {
-  int *p, idx;
+    int *p, idx;
 
-  for (p = zero_terminated_array; (idx = *p); p++)
-    literals[idx].mark = mark;
+    for (p = zero_terminated_array; (idx = *p); p++)
+        literals[idx].mark = mark;
 }
 
 
 /*------------------------------------------------------------------------*/
 
-  static int
+static int
 normalize_literals (Clause * clause)
 {
-  int idx, *p;
+    int idx, *p;
 
-  assert (clause->literals);
+    assert (clause->literals);
 #ifndef NDEBUG
-  for (p = clause->literals; (idx = *p); p++)
-    assert (!literals[idx].mark);
+    for (p = clause->literals; (idx = *p); p++)
+        assert (!literals[idx].mark);
 #endif
 
-  for (p = clause->literals; (idx = *p); p++)
-  {
-    if (literals[idx].mark)
-      return
-        check_error
-        ("multiple occurrences of literal %d in clause %d at line %d", idx,
-         clause->idx, clause->lineno);
+    for (p = clause->literals; (idx = *p); p++) {
+        if (literals[idx].mark)
+            return
+                check_error
+                ("multiple occurrences of literal %d in clause %d at line %d", idx,
+                 clause->idx, clause->lineno);
 
-    if (literals[-idx].mark)
-      return check_error ("clause %d at line %d is trivial "
-          "since it contains %d and %d",
-          clause->idx, clause->lineno, -idx, idx);
+        if (literals[-idx].mark)
+            return check_error ("clause %d at line %d is trivial "
+                                "since it contains %d and %d",
+                                clause->idx, clause->lineno, -idx, idx);
 
-    literals[idx].mark = 1;
-  }
+        literals[idx].mark = 1;
+    }
 
-  mark_literals (clause->literals, 0);
+    mark_literals (clause->literals, 0);
 
-  return 1;
+    return 1;
 }
 
 /*------------------------------------------------------------------------*/
 
-  static int
+static int
 normalize_antecedents (Clause * clause)
 {
-  Clause *antecedent;
-  int idx, *p;
+    Clause *antecedent;
+    int idx, *p;
 
-  assert (clause->antecedents);
+    assert (clause->antecedents);
 #ifndef NDEBUG
-  for (p = clause->antecedents; (idx = *p); p++)
-    assert (!idx2clause (idx)->mark);
+    for (p = clause->antecedents; (idx = *p); p++)
+        assert (!idx2clause (idx)->mark);
 #endif
 
-  for (p = clause->antecedents; (idx = *p); p++)
-  {
-    antecedent = idx2clause (idx);
-    assert (antecedent);
-    if (antecedent->mark)
-      return
-        check_error
-        ("multiple occurrene of antecedent %d in chain %d at line %d", idx,
-         clause->idx, clause->lineno);
+    for (p = clause->antecedents; (idx = *p); p++) {
+        antecedent = idx2clause (idx);
+        assert (antecedent);
+        if (antecedent->mark)
+            return
+                check_error
+                ("multiple occurrene of antecedent %d in chain %d at line %d", idx,
+                 clause->idx, clause->lineno);
 
-    antecedent->mark = 1;
-  }
+        antecedent->mark = 1;
+    }
 
-  for (p = clause->antecedents; (idx = *p); p++)
-    idx2clause (idx)->mark = 0;
+    for (p = clause->antecedents; (idx = *p); p++)
+        idx2clause (idx)->mark = 0;
 
-  return 1;
+    return 1;
 }
 
 /*------------------------------------------------------------------------*/
@@ -1765,214 +1713,199 @@ normalize_antecedents (Clause * clause)
  * same literal nor the same antecedent.  Both restrictions are not strictly
  * necessary but simplify the implementation.
  *
- * TODO: 
- *  
+ * TODO:
+ *
  *  rather then aborting try to fix the problem.
  */
-  static int
+static int
 normalize (Clause * clause)
 {
-  if (!normalize_literals (clause))
-    return 0;
+    if (!normalize_literals (clause))
+        return 0;
 
-  if (clause->antecedents && !normalize_antecedents (clause))
-    return 0;
+    if (clause->antecedents && !normalize_antecedents (clause))
+        return 0;
 
-  return 1;
+    return 1;
 }
 
 /*------------------------------------------------------------------------*/
 /* Computing final clause of a chain. It is the remainder of possible
  * resolutions.
  */
-  static int
+static int
 collect_literals (Clause * clause)
 {
-  int idx, * p, * q, lit;
-  Clause * antecedent;
+    int idx, * p, * q, lit;
+    Clause * antecedent;
 
-  // Note: Collect literals for all internal vertices, no matter if literal list
-  // supplied or not
-  if (!clause->antecedents/*clause->literals*/)
+    // Note: Collect literals for all internal vertices, no matter if literal
+    // list supplied or not
+    if (!clause->antecedents/*clause->literals*/)
+        return 1;
+
+    assert (!count_stack);
+    assert (clause->antecedents);		/* should be checked by parser */
+
+    for (p = clause->antecedents; (idx = *p); p++) {
+        antecedent = idx2clause (idx);
+
+        assert (antecedent);
+        assert (antecedent->literals);
+
+        for (q = antecedent->literals; (lit = *q); q++) {
+            short label = UNDEF;
+            if (!antecedent->antecedents) {
+                // TODO visit always or just once?
+                label = antecedent->partition;
+
+                // partition(var(l))
+                literals[-lit].partition = literals[lit].partition =
+                                               (literals[-lit].partition | literals[lit].partition | label);
+
+            } else
+                label = antecedent->labels[q - antecedent->literals];
+
+
+            // Note: label for pivots doesn't matter at this point
+            // It is determined in resolve_and_split later.
+            // We only compute labels for literals in resolvent
+            // marks encoded in LSBs: xyz:
+            //   x ... merge literal
+            //   y ... appears in both phases
+            //   z ... appears in one phase
+            // y and z are mutually exclusive
+            // x is only set if y or z are set
+            if (literals[lit].mark & 1) {
+                literals[lit].mark |= 4;
+                assert (literals[lit].label != UNDEF);
+                literals[lit].label |= label;
+            } else if (literals[lit].mark == 0) {
+                literals[lit].mark = 1;
+                literals[lit].label = label;
+            } else if (literals[lit].mark & 2) {
+                assert (literals[lit].label != UNDEF);
+                literals[lit].mark |= 4;
+            }
+
+            if (literals[-lit].mark) {
+                literals[lit].mark = (literals[lit].mark & 4) | 2;
+                literals[-lit].mark = (literals[-lit].mark & 4) | 2;
+            }
+
+            if (original_cnf_file_name && abs (lit) > original_variables)
+                return check_error ("literal %d too large", lit);
+
+            push_stack (lit);
+        }
+    }
+
+    /* Shrink stack by literals in both phases, keep those occurring only in
+     * one phase.
+     */
+
+    q = stack;
+    for (p = stack; p < stack + count_stack; p++) {
+        lit = *p;
+        if (literals[lit].mark & 1) {
+            *q++ = lit;
+            push_labels(literals[lit].label);
+        }
+        if (literals[lit].mark & 4)
+            num_merge_literals++;
+
+        // if lit appears more than once with mark == 1 in stack before this
+        // loop: as mark is reset, rest is ignored
+
+        literals[lit].mark = 0;
+        literals[lit].label = UNDEF;
+    }
+
+    count_stack = q - stack;
+
+    if (!count_stack)
+        num_empty_clauses++;
+
+    clause->literals = copy_stack ();
+    clause->labels = copy_labels ();
+
     return 1;
-
-  assert (!count_stack);
-  assert (clause->antecedents);		/* should be checked by parser */
-
-  for (p = clause->antecedents; (idx = *p); p++)
-  {
-    antecedent = idx2clause (idx);
-
-    assert (antecedent);
-    assert (antecedent->literals);
-
-    for (q = antecedent->literals; (lit = *q); q++)
-    {
-      short label = UNDEF;
-      if (!antecedent->antecedents)
-      {
-        // TODO visit always or just once?
-        label = antecedent->partition;
-
-        // partition(var(l))
-        literals[-lit].partition = literals[lit].partition = 
-          (literals[-lit].partition | literals[lit].partition | label);
-
-      } else
-        label = antecedent->labels[q - antecedent->literals];
-
-
-      // Note: label for pivots doesn't matter at this point
-      // It is determined in resolve_and_split later.
-      // We only compute labels for literals in resolvent
-      // marks encoded in LSBs: xyz:
-      //   x ... merge literal
-      //   y ... appears in both phases
-      //   z ... appears in one phase
-      // y and z are mutually exclusive
-      // x is only set if y or z are set
-      if (literals[lit].mark & 1)
-      {
-        literals[lit].mark |= 4;
-        assert (literals[lit].label != UNDEF);
-        literals[lit].label |= label;
-      }
-      else if (literals[lit].mark == 0)
-      {
-        literals[lit].mark = 1;
-        literals[lit].label = label;
-      }
-      else if (literals[lit].mark & 2)
-      {
-        assert (literals[lit].label != UNDEF);
-        literals[lit].mark |= 4;
-      }
-
-      if (literals[-lit].mark)
-      {
-        literals[lit].mark = (literals[lit].mark & 4) | 2;
-        literals[-lit].mark = (literals[-lit].mark & 4) | 2;
-      }
-
-      if (original_cnf_file_name && abs (lit) > original_variables)
-        return check_error ("literal %d too large", lit);
-
-      push_stack (lit);
-    }
-  }
-
-  /* Shrink stack by literals in both phases, keep those occurring only in
-   * one phase.
-   */
-
-  q = stack;
-  for (p = stack; p < stack + count_stack; p++)
-  {
-    lit = *p;
-    if (literals[lit].mark & 1)
-    {
-      *q++ = lit;
-      push_labels(literals[lit].label);
-    }
-    if (literals[lit].mark & 4)
-      num_merge_literals++;
-
-    // if lit appears more than once with mark == 1 in stack before this loop:
-    // as mark is reset, rest is ignored
-
-    literals[lit].mark = 0;
-    literals[lit].label = UNDEF;
-  }
-
-  count_stack = q - stack;
-
-  if (!count_stack)
-    num_empty_clauses++;
-
-  clause->literals = copy_stack ();
-  clause->labels = copy_labels ();
-
-  return 1;
 }
 
-  static int
+static int
 split_clauses_count (Clause * clause)
 {
-  if (!clause->antecedents)
+    if (!clause->antecedents)
+        return 1;
+
+    if (clause->split && clause->idx <= max_cls_idx)
+        num_split_clauses++;
+
     return 1;
-
-  if (clause->split && clause->idx <= max_cls_idx)
-    num_split_clauses++;
-
-  return 1;
 }
 
-  static int
+static int
 merge_literals_count (Clause * clause)
 {
-  int idx, * p, * q, lit;
-  Clause * antecedent;
+    int idx, * p, * q, lit;
+    Clause * antecedent;
 
-  // Note: Collect literals for all internal vertices, no matter if literal list
-  // supplied or not
-  if (!clause->antecedents/*clause->literals*/)
-    return 1;
+    // Note: Collect literals for all internal vertices, no matter if literal list
+    // supplied or not
+    if (!clause->antecedents/*clause->literals*/)
+        return 1;
 
-  assert (clause->antecedents);		/* should be checked by parser */
+    assert (clause->antecedents);		/* should be checked by parser */
 
-  for (p = clause->antecedents; (idx = *p); p++)
-  {
-    antecedent = idx2clause (idx);
+    for (p = clause->antecedents; (idx = *p); p++) {
+        antecedent = idx2clause (idx);
 
-    assert (antecedent);
-    assert (antecedent->literals);
+        assert (antecedent);
+        assert (antecedent->literals);
 
-    for (q = antecedent->literals; (lit = *q); q++)
-    {
-      // Note: label for pivots doesn't matter at this point
-      // It is determined in resolve_and_split later.
-      // We only compute labels for literals in resolvent
-      // marks encoded in LSBs: xyz:
-      //   x ... merge literal
-      //   y ... appears in both phases
-      //   z ... appears in one phase
-      // y and z are mutually exclusive
-      // x is only set if y or z are set
-      if (literals[lit].mark & 1)
-        literals[lit].mark |= 4;
-      else if (literals[lit].mark == 0)
-        literals[lit].mark = 1;
-      else if (literals[lit].mark & 2)
-        literals[lit].mark |= 4;
+        for (q = antecedent->literals; (lit = *q); q++) {
+            // Note: label for pivots doesn't matter at this point
+            // It is determined in resolve_and_split later.
+            // We only compute labels for literals in resolvent
+            // marks encoded in LSBs: xyz:
+            //   x ... merge literal
+            //   y ... appears in both phases
+            //   z ... appears in one phase
+            // y and z are mutually exclusive
+            // x is only set if y or z are set
+            if (literals[lit].mark & 1)
+                literals[lit].mark |= 4;
+            else if (literals[lit].mark == 0)
+                literals[lit].mark = 1;
+            else if (literals[lit].mark & 2)
+                literals[lit].mark |= 4;
 
-      if (literals[-lit].mark)
-      {
-        literals[lit].mark = (literals[lit].mark & 4) | 2;
-        literals[-lit].mark = (literals[-lit].mark & 4) | 2;
-      }
+            if (literals[-lit].mark) {
+                literals[lit].mark = (literals[lit].mark & 4) | 2;
+                literals[-lit].mark = (literals[-lit].mark & 4) | 2;
+            }
 
-      push_stack (lit);
+            push_stack (lit);
+        }
     }
-  }
 
-  /* Shrink stack by literals in both phases, keep those occurring only in
-   * one phase.
-   */
-  for (p = stack; p < stack + count_stack; p++)
-  {
-    lit = *p;
-    if (literals[lit].mark & 4)
-      num_merge_literals_after++;
+    /* Shrink stack by literals in both phases, keep those occurring only in
+     * one phase.
+     */
+    for (p = stack; p < stack + count_stack; p++) {
+        lit = *p;
+        if (literals[lit].mark & 4)
+            num_merge_literals_after++;
 
-    // if lit appears more than once with mark == 1 in stack before this loop:
-    // as mark is reset, rest is ignored
+        // if lit appears more than once with mark == 1 in stack before this loop:
+        // as mark is reset, rest is ignored
 
-    literals[lit].mark = 0;
-    literals[lit].label = UNDEF;
-  }
-  count_stack = 0;
+        literals[lit].mark = 0;
+        literals[lit].label = UNDEF;
+    }
+    count_stack = 0;
 
-  return 1;
+    return 1;
 }
 
 
@@ -1980,310 +1913,304 @@ merge_literals_count (Clause * clause)
 /* Return the first literal that occurs already negated in the resolvent.
  * Also set the label of the pivot.
  */
-  static int
+static int
 pivot (Clause * clause, Clause * context)
 {
-  int *p, idx, pos;
-  int merge;
+    int *p, idx, pos;
+    int merge;
 
-  for (p = clause->literals; (idx = *p); p++)
-  {
-    pos = literals[-idx].mark;
-    if (pos > 0)
-    {
-      // Compute merge of literal labels for the pivot
-      merge = clause->labels[p - clause->literals] | literals[-idx].label;
-      literals[-idx].label = merge;
-      return idx;
+    for (p = clause->literals; (idx = *p); p++) {
+        pos = literals[-idx].mark;
+        if (pos > 0) {
+            // Compute merge of literal labels for the pivot
+            merge = clause->labels[p - clause->literals] | literals[-idx].label;
+            literals[-idx].label = merge;
+            return idx;
+        }
     }
-  }
 
-  return check_error (
-      "clause %d has no pivot in deriviation of clause %d",
-      clause->idx, context->idx);
+    return check_error (
+               "clause %d has no pivot in deriviation of clause %d",
+               clause->idx, context->idx);
 }
 
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 remove_literal_from_resolvent (int idx)
 {
-  int pos, last;
+    int pos, last;
 
-  pos = literals[idx].mark;
+    pos = literals[idx].mark;
 
-  assert (pos > 0);
-  assert (pos <= count_resolvent);
-  assert (resolvent[pos - 1] == idx);
+    assert (pos > 0);
+    assert (pos <= count_resolvent);
+    assert (resolvent[pos - 1] == idx);
 
-  literals[idx].mark = 0;
-  last = pop_resolvent ();
+    literals[idx].mark = 0;
+    last = pop_resolvent ();
 
-  if (last == idx)
-    return;
+    if (last == idx)
+        return;
 
-  assert (count_resolvent >= 1);
+    assert (count_resolvent >= 1);
 
-  resolvent[pos - 1] = last;
-  assert (literals[last].mark == count_resolvent + 1);
-  literals[last].mark = pos;
+    resolvent[pos - 1] = last;
+    assert (literals[last].mark == count_resolvent + 1);
+    literals[last].mark = pos;
 }
 
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 add_literal_to_resolvent (int idx, short label)
 {
-  Literal *lit;
+    Literal *lit;
 
-  lit = literals + idx;
-  assert (!lit->mark);
-  // intermediate clause index
-  // used in remove_literal_from_resolvent
-  lit->mark = count_resolvent + 1;
-  lit->label = label;
-  push_resolvent (idx);
-  assert (resolvent[lit->mark - 1] == idx);
+    lit = literals + idx;
+    assert (!lit->mark);
+    // intermediate clause index
+    // used in remove_literal_from_resolvent
+    lit->mark = count_resolvent + 1;
+    lit->label = label;
+    push_resolvent (idx);
+    assert (resolvent[lit->mark - 1] == idx);
 }
 
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 add_to_resolvent_except (Clause * clause, int idx)
 {
-  int *p, other;
+    int *p, other;
 
-  for (p = clause->literals; (other = *p); p++)
-  {
-    /* Skip resolved literal
-     */
-    if (other == idx)
-      continue;
+    for (p = clause->literals; (other = *p); p++) {
+        /* Skip resolved literal
+         */
+        if (other == idx)
+            continue;
 
-    /* Note: skip literals already part of resolvent
-             or add them
-       merge of lit here
-     */
-    if (literals[other].mark)
-    {
-      assert (literals[other].label != UNDEF);
-      literals[other].label |= clause->labels[p - clause->literals];
+        /* Note: skip literals already part of resolvent
+                 or add them
+           merge of lit here
+         */
+        if (literals[other].mark) {
+            assert (literals[other].label != UNDEF);
+            literals[other].label |= clause->labels[p - clause->literals];
+        } else
+            add_literal_to_resolvent (other, 
+              clause->labels[p - clause->literals]);
     }
-    else 
-      add_literal_to_resolvent (other, clause->labels[p - clause->literals]);
-  }
 }
 
 /*------------------------------------------------------------------------*/
 #ifdef BOOLEFORCE_LOG
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 printnl_ints (int *a)
 {
-  int *p, idx;
+    int *p, idx;
 
-  for (p = a; (idx = *p); p++)
-    fprintf (output, "%d ", idx);
+    for (p = a; (idx = *p); p++)
+        fprintf (output, "%d ", idx);
 
-  fputs ("0\n", output);
+    fputs ("0\n", output);
 }
 
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 print_resolvent (const char *type)
 {
-  fprintf (output, VPFX "%s resolvent: ", type);
-  push_resolvent (0);
-  printnl_ints (resolvent);
-  (void) pop_resolvent ();
+    fprintf (output, VPFX "%s resolvent: ", type);
+    push_resolvent (0);
+    printnl_ints (resolvent);
+    (void) pop_resolvent ();
 }
 
 /*------------------------------------------------------------------------*/
 #endif
 /*------------------------------------------------------------------------*/
 
-  inline static int
+inline static int
 resolve_clause (Clause * clause, Clause * context, short pivot_label)
 {
-  int idx;
+    int idx;
 
-  num_resolutions++;
+    num_resolutions++;
 
-  if (!(idx = pivot (clause, context)))
-    return 0;
+    if (!(idx = pivot (clause, context)))
+        return 0;
 
 #ifdef BOOLEFORCE_LOG
-  if (verbose > 1)
-    LOG ("resolving clause %d on literal %d", clause->idx, idx);
+    if (verbose > 1)
+        LOG ("resolving clause %d on literal %d", clause->idx, idx);
 #endif
 
-  // check whether chain is contiguously labeled.
-  if (pivot_label != UNDEF && pivot_label != literals[-idx].label)
+    // check whether chain is contiguously labeled.
+    if (pivot_label != UNDEF && pivot_label != literals[-idx].label)
+        return idx;
+
+    remove_literal_from_resolvent (-idx);
+    add_to_resolvent_except (clause, idx);
+
     return idx;
-
-  remove_literal_from_resolvent (-idx);
-  add_to_resolvent_except (clause, idx);
-
-  return idx;
 }
 
 /*------------------------------------------------------------------------*/
 
-  static int
+static int
 subsumes (int *a, int *b)
 {
-  int *p, idx, count;
+    int *p, idx, count;
 
-  for (p = a; (idx = *p); p++)
-    literals[idx].mark = 1;
+    for (p = a; (idx = *p); p++)
+        literals[idx].mark = 1;
 
-  count = p - a;
+    count = p - a;
 
-  for (p = b; (idx = *p); p++)
-  {
-    if (!literals[idx].mark)
-      continue;
+    for (p = b; (idx = *p); p++) {
+        if (!literals[idx].mark)
+            continue;
 
-    assert (count > 0);
-    count--;
-  }
+        assert (count > 0);
+        count--;
+    }
 
-  assert (count >= 0);
+    assert (count >= 0);
 
-  mark_literals (a, 0);
+    mark_literals (a, 0);
 
-  return !count;
+    return !count;
 }
 
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 write_res_header (void)
 {
-  char line[40];
-  assert (restrace);
-  assert (original_cnf_file_name);
-  sprintf (line, "%%RESL32 %d %d", original_variables, original_clauses);
-  fprintf (restrace, "%-255s\n", line);
-  fflush (restrace);
+    char line[40];
+    assert (restrace);
+    assert (original_cnf_file_name);
+    sprintf (line, "%%RESL32 %d %d", original_variables, original_clauses);
+    fprintf (restrace, "%-255s\n", line);
+    fflush (restrace);
 }
 
 /*------------------------------------------------------------------------*/
 
-  static void
-write_res_line (int count, int literal, 
-    int op1, int op2, int len, int * literals)
+static void
+write_res_line (int count, int literal,
+                int op1, int op2, int len, int * literals)
 {
-  int buffer[5];
+    int buffer[5];
 
-  assert (restrace);
+    assert (restrace);
 
-  assert (op1 > 0);
-  assert (op2 > 0);
-  assert (count > op1);
-  assert (count > op2);
+    assert (op1 > 0);
+    assert (op2 > 0);
+    assert (count > op1);
+    assert (count > op2);
 
-  buffer[0] = count;
-  buffer[1] = literal;
-  buffer[2] = op1;
-  buffer[3] = op2;
-  buffer[4] = len;
+    buffer[0] = count;
+    buffer[1] = literal;
+    buffer[2] = op1;
+    buffer[3] = op2;
+    buffer[4] = len;
 
-  fwrite (buffer, sizeof (int), 5, restrace);
-  fwrite (literals, sizeof (int), len, restrace);
-  fwrite (buffer + 4, sizeof (int), 1, restrace);
+    fwrite (buffer, sizeof (int), 5, restrace);
+    fwrite (literals, sizeof (int), len, restrace);
+    fwrite (buffer + 4, sizeof (int), 1, restrace);
 }
 
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 write_rpt_header (void)
 {
-  char line[40];
-  assert (rpttrace);
-  assert (original_cnf_file_name);
-  sprintf (line, "%%RPTL32 %d %d", original_variables, original_clauses);
-  fprintf (rpttrace, "%-255s\n", line);
-  fflush (rpttrace);
+    char line[40];
+    assert (rpttrace);
+    assert (original_cnf_file_name);
+    sprintf (line, "%%RPTL32 %d %d", original_variables, original_clauses);
+    fprintf (rpttrace, "%-255s\n", line);
+    fflush (rpttrace);
 }
 
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 write_rpt_line (int count, int literal, int op1, int op2)
 {
-  int buffer[4];
+    int buffer[4];
 
-  assert (rpttrace);
+    assert (rpttrace);
 
-  assert (op1 > 0);
-  assert (op2 > 0);
-  assert (count > op1);
-  assert (count > op2);
+    assert (op1 > 0);
+    assert (op2 > 0);
+    assert (count > op1);
+    assert (count > op2);
 
-  buffer[0] = count;
-  buffer[1] = literal;
-  buffer[2] = op1;
-  buffer[3] = op2;
+    buffer[0] = count;
+    buffer[1] = literal;
+    buffer[2] = op1;
+    buffer[3] = op2;
 
-  fwrite (buffer, sizeof (int), 4, rpttrace);
+    fwrite (buffer, sizeof (int), 4, rpttrace);
 }
 
-  static void
+static void
 write_dotgraph_header (void)
 {
-  // TODO sanitize input_name and use it
-  fprintf (dotgraph, "digraph resproof {\n");
+    // TODO sanitize input_name and use it
+    fprintf (dotgraph, "digraph resproof {\n");
 }
 
-  static void
+static void
 write_dotgraph_footer (void)
 {
-  fprintf (dotgraph, "}");
+    fprintf (dotgraph, "}");
 }
 
 /*------------------------------------------------------------------------*/
 #ifndef NDEBUG
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 check_prestine_clause (Clause * clause)
 {
-  Literal *lit;
-  int *p, idx;
+    Literal *lit;
+    int *p, idx;
 
-  if (!clause->literals)
-    return;
+    if (!clause->literals)
+        return;
 
-  assert (clause->mark == 0);
+    assert (clause->mark == 0);
 
-  for (p = clause->literals; (idx = *p); p++)
-  {
-    lit = literals + idx;
+    for (p = clause->literals; (idx = *p); p++) {
+        lit = literals + idx;
 
-    assert (!lit->mark);
-    assert (!lit->clauses);
-  }
+        assert (!lit->mark);
+        assert (!lit->clauses);
+    }
 }
 
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 check_prestine_chain (Clause * clause)
 {
-  int *p, idx;
+    int *p, idx;
 
-  if (!debug)
-    return;
+    if (!debug)
+        return;
 
-  check_prestine_clause (clause);
-  if (!clause->antecedents)
-    return;
+    check_prestine_clause (clause);
+    if (!clause->antecedents)
+        return;
 
-  for (p = clause->antecedents; (idx = *p); p++)
-    check_prestine_clause (idx2clause (idx));
+    for (p = clause->antecedents; (idx = *p); p++)
+        check_prestine_clause (idx2clause (idx));
 }
 
 /*------------------------------------------------------------------------*/
@@ -2299,766 +2226,725 @@ check_prestine_chain (Clause * clause)
  * TODO: if requested by the user, the resolutions are recorded as new
  * clauses, such they can be dumped afterwards.
  */
-  static int
+static int
 resolve_and_split (Clause ** clause)
 {
-  int *p, idx, iterations, count, prev, i, lit, len;
-  short pivot_label;
-  Clause *antecedent;
+    int *p, idx, iterations, len, count, prev, i, lit;
+    short pivot_label;
+    Clause *antecedent;
 #ifndef NDEBUG
-  int *q, idx2;
+    int *q, idx2;
 #endif
 
-  pivot_label = UNDEF;
-  if (!(*clause)->antecedents)
-    goto POST_PROCESS_RESOLVED_CHAIN;
+    pivot_label = UNDEF;
+    if (!(*clause)->antecedents)
+        goto POST_PROCESS_RESOLVED_CHAIN;
 
-#ifdef BOOLEFORCE_LOG
-  if (verbose > 1)
-    LOG ("resolving antecedents of clause %d", (*clause)->idx);
-#endif
-
-  assert (!count_resolvent);
-  assert (!count_stack);
-
-  assert ((*clause)->antecedents);
-  p = (*clause)->antecedents;
-  idx = *p++;
-
-  if (!idx)
-    return check_error ("clause %d at line %d has no antecedents",
-        (*clause)->idx, (*clause)->lineno);
-
-#if 0
-  if (!*p)
-    return check_error ("clause %d at line %d has only one antecedent",
-        clause->idx, clause->lineno);
-#endif
-
-  antecedent = idx2clause (idx);
-  push_stack (idx);
-  assert (antecedent);
-  assert (antecedent->resolved);	/* check topological order */
-
-  /* Copy all literals of the first clause to the resolvent.  This will be
-   * the 'initial resolvent'.  The second argument '0' is a non valid
-   * literal.  Thus all literals are added.
-   */
-  add_to_resolvent_except (antecedent, 0);
-
-  len = length_ints ((*clause)->antecedents);
-  count = (*clause)->newidx + 2 - len;
-  prev = antecedent->newidx;
-
-#ifdef BOOLEFORCE_LOG
-  if (verbose > 1)
-    LOG ("copying antecedent clause %d as initial resolvent",
-        antecedent->idx);
-#endif
-  if (dotgraph)
-    fprintf (dotgraph, "n_%d -> n_%d;\n", antecedent->idx, (*clause)->idx);
-
-  /* Further try to resolve in the given order the remaining clauses with
-   * the current resolvent to obtain the next intermediate resolvent.
-   */
-  iterations = 0;
-  while ((idx = *p++))
-  {
 #ifdef BOOLEFORCE_LOG
     if (verbose > 1)
-      print_resolvent (iterations ? "next" : "initial");
+        LOG ("resolving antecedents of clause %d", (*clause)->idx);
 #endif
 
-    iterations++;
+    assert (!count_resolvent);
+    assert (!count_stack);
+
+    assert ((*clause)->antecedents);
+    p = (*clause)->antecedents;
+    idx = *p++;
+
+    if (!idx)
+        return check_error ("clause %d at line %d has no antecedents",
+                            (*clause)->idx, (*clause)->lineno);
+
+#if 0
+    if (!*p)
+        return check_error ("clause %d at line %d has only one antecedent",
+                            clause->idx, clause->lineno);
+#endif
 
     antecedent = idx2clause (idx);
+    push_stack (idx);
     assert (antecedent);
-    assert (antecedent->resolved);
+    assert (antecedent->resolved);	/* check topological order */
 
-    if (!(lit = resolve_clause (antecedent, (*clause), pivot_label)))
-      return 0;
+    /* Copy all literals of the first clause to the resolvent.  This will be
+     * the 'initial resolvent'.  The second argument '0' is a non valid
+     * literal.  Thus all literals are added.
+     */
+    add_to_resolvent_except (antecedent, 0);
 
-    // check whether chain is contiguously labeled.
-    // Note: careful with lit/idx
-    // literals[-lit].label is the merged label of the pivot literals
-    if (pivot_label != UNDEF && pivot_label != literals[-lit].label)
-    {
-      // NEW SPLIT
-      // TODO refactor into new function
-      num_splits++;
-      (*clause)->split = 1;
-
-      for (i = 0; i < count_resolvent; i++)
-        push_labels(literals[resolvent[i]].label);
-
-      // create intermediate clause
-      int *tmp_res = copy_ints(resolvent, count_resolvent);
-      int *tmp_ants = copy_stack();
-      int new_idx = max_cls_idx + 1;
-      Clause *intermediate = add_clause(new_idx, tmp_res, tmp_ants, 0);
-      intermediate->labels = copy_labels();
-
-      // UPDATE
-      // remove antecedents (indices from 0 to (iterations-1))
-      // add new resolvent as antecedent at index (iterations-1)
-      // in order not to leak memory
-      // copy relevant memory region and free previously used memory
-      (*clause)->antecedents[iterations - 1] = new_idx;
-      int *tmp = copy_ints((*clause)->antecedents + (iterations - 1),
-                     length_ints((*clause)->antecedents) - (iterations - 1));
-      booleforce_delete_ints ((*clause)->antecedents);
-      (*clause)->antecedents = tmp;
-
-      intermediate->next_in_order = *clause;
-      if(*clause == first_in_order)
-        first_in_order = intermediate;
-#ifndef NDEBUG
-      (*clause)->resolved = 1;
-#endif
-      *clause = intermediate;
-      // Note: Reset not necessary because label is set from clause label anyhow
-      // before merge
-      literals[-lit].label = UNDEF;
-      break;
-    }
-    // else
-
-    // Note: lagging one iteration behind so that antecedent causing split is
-    // not included
-    push_stack(idx);
-
-    pivot_label = literals[-lit].label;
-
-#ifndef NDEBUG
-    for (q = (*clause)->literals; (idx2 = *q); q++) {
-      assert (idx2 != lit && idx2 != -lit);
-    }
-#endif
-    
-    if (bintrace)
-      fprintf (bintrace, "%d * %d %d 0\n", count, prev, antecedent->newidx);
-
-    if (ebintrace)
-    {
-      fprintf (ebintrace, "%d ", count);
-      for (i = 0; i < count_resolvent; i++)
-        fprintf (ebintrace, "%d ", resolvent[i]);
-      fprintf (ebintrace, "0 %d %d 0\n", prev, antecedent->newidx);
-    }
-
-    if (rpttrace)
-      write_rpt_line (count, lit, prev, antecedent->newidx);
-
-    if (restrace)
-      write_res_line (count, lit, 
-          prev, antecedent->newidx,
-          count_resolvent, resolvent);
-
-    if (dotgraph)
-      fprintf (dotgraph, "n_%d -> n_%d;\n", antecedent->idx, (*clause)->idx);
-
-    prev = count++;
-  }
+    len = length_ints ((*clause)->antecedents);
+    count = (*clause)->newidx + 2 - len;
+    prev = antecedent->newidx;
 
 #ifdef BOOLEFORCE_LOG
-  if (verbose > 1)
-    print_resolvent ("last");
+    if (verbose > 1)
+        LOG ("copying antecedent clause %d as initial resolvent",
+             antecedent->idx);
+#endif
+    if (dotgraph)
+        fprintf (dotgraph, "n_%d -> n_%d;\n", antecedent->idx, (*clause)->idx);
+
+    /* Further try to resolve in the given order the remaining clauses with
+     * the current resolvent to obtain the next intermediate resolvent.
+     */
+    iterations = 0;
+    while ((idx = *p++)) {
+#ifdef BOOLEFORCE_LOG
+        if (verbose > 1)
+            print_resolvent (iterations ? "next" : "initial");
 #endif
 
-  if (count_resolvent == 0)
-    empty_cls_idx = (*clause)->idx;
+        iterations++;
 
-  /* The final resolvent should be equal to the clause.  We check it by two
-   * subsume tests, which, if one of them fails, gives a little bit more
-   * information to the user.
-   */
-  push_resolvent (0);		/* sentinel */
+        antecedent = idx2clause (idx);
+        assert (antecedent);
+        assert (antecedent->resolved);
 
-  for (p = resolvent; (idx = *p); p++)
-  {
-    literals[idx].mark = 0;
-    // Note: Reset not necessary because label is set from clause label anyhow
-    // before merge
-    literals[idx].label = UNDEF;
-  }
+        if (!(lit = resolve_clause (antecedent, (*clause), pivot_label)))
+            return 0;
 
-  if (!subsumes (resolvent, (*clause)->literals))
-    return check_error ("resolvent does not subsume clause %d at line %d",
-        (*clause)->idx, (*clause)->lineno);
+        // check whether chain is contiguously labeled.
+        // Note: careful with lit/idx
+        // literals[-lit].label is the merged label of the pivot literals
+        if (pivot_label != UNDEF && pivot_label != literals[-lit].label) {
+            // NEW SPLIT
+            // TODO refactor into new function
+            num_splits++;
+            (*clause)->split = 1;
 
-  if (!subsumes ((*clause)->literals, resolvent))
-    return check_error ("clause %d at line %d does not subsume resolvent",
-        (*clause)->idx, (*clause)->lineno);
+            for (i = 0; i < count_resolvent; i++)
+                push_labels(literals[resolvent[i]].label);
 
-  count_resolvent = 0;
+            // create intermediate clause
+            int *tmp_res = copy_ints(resolvent, count_resolvent);
+            int *tmp_ants = copy_stack();
+            int new_idx = max_cls_idx + 1;
+            Clause *intermediate = add_clause(new_idx, tmp_res, tmp_ants, 0);
+            intermediate->labels = copy_labels();
 
-  // Note: delete the stack if we haven't used it to copy the antecedents from
-  // it
-  // TODO: enough to free memory of stack or leaking here?
-  count_stack = 0;
+            // UPDATE
+            // remove antecedents (indices from 0 to (iterations-1))
+            // add new resolvent as antecedent at index (iterations-1)
+            // in order not to leak memory
+            // copy relevant memory region and free previously used memory
+            (*clause)->antecedents[iterations - 1] = new_idx;
+            int *tmp = copy_ints((*clause)->antecedents + (iterations - 1),
+                                 length_ints((*clause)->antecedents) - (iterations - 1));
+            booleforce_delete_ints ((*clause)->antecedents);
+            (*clause)->antecedents = tmp;
 
-  // Note: would jump over this otherwise anyhow
-  // if((*clause)->antecedents)
-  (*clause)->partition = pivot_label;
-  assert ((*clause)->partition != UNDEF);
+            intermediate->next_in_order = *clause;
+            if(*clause == first_in_order)
+                first_in_order = intermediate;
+#ifndef NDEBUG
+            (*clause)->resolved = 1;
+#endif
+            *clause = intermediate;
+            // Note: Reset not necessary because label is set from clause label anyhow
+            // before merge
+            literals[-lit].label = UNDEF;
+            break;
+        }
+        // else
+
+        // Note: lagging one iteration behind so that antecedent causing split is
+        // not included
+        push_stack(idx);
+
+        pivot_label = literals[-lit].label;
+
+#ifndef NDEBUG
+        for (q = (*clause)->literals; (idx2 = *q); q++) {
+            assert (idx2 != lit && idx2 != -lit);
+        }
+#endif
+
+        if (bintrace)
+            fprintf (bintrace, "%d * %d %d 0\n", count, prev, antecedent->newidx);
+
+        if (ebintrace) {
+            fprintf (ebintrace, "%d ", count);
+            for (i = 0; i < count_resolvent; i++)
+                fprintf (ebintrace, "%d ", resolvent[i]);
+            fprintf (ebintrace, "0 %d %d 0\n", prev, antecedent->newidx);
+        }
+
+        if (rpttrace)
+            write_rpt_line (count, lit, prev, antecedent->newidx);
+
+        if (restrace)
+            write_res_line (count, lit,
+                            prev, antecedent->newidx,
+                            count_resolvent, resolvent);
+
+        if (dotgraph)
+            fprintf (dotgraph, "n_%d -> n_%d;\n", antecedent->idx, (*clause)->idx);
+
+        prev = count++;
+    }
+
+#ifdef BOOLEFORCE_LOG
+    if (verbose > 1)
+        print_resolvent ("last");
+#endif
+
+    if (count_resolvent == 0)
+        empty_cls_idx = (*clause)->idx;
+
+    /* The final resolvent should be equal to the clause.  We check it by two
+     * subsume tests, which, if one of them fails, gives a little bit more
+     * information to the user.
+     */
+    push_resolvent (0);		/* sentinel */
+
+    for (p = resolvent; (idx = *p); p++) {
+        literals[idx].mark = 0;
+        // Note: Reset not necessary because label is set from clause label anyhow
+        // before merge
+        literals[idx].label = UNDEF;
+    }
+
+    if (!subsumes (resolvent, (*clause)->literals))
+        return check_error ("resolvent does not subsume clause %d at line %d",
+                            (*clause)->idx, (*clause)->lineno);
+
+    if (!subsumes ((*clause)->literals, resolvent))
+        return check_error ("clause %d at line %d does not subsume resolvent",
+                            (*clause)->idx, (*clause)->lineno);
+
+    count_resolvent = 0;
+
+    // Note: delete the stack if we haven't used it to copy the antecedents from
+    // it
+    // TODO: enough to free memory of stack or leaking here?
+    count_stack = 0;
+
+    // Note: would jump over this otherwise anyhow
+    // if((*clause)->antecedents)
+    (*clause)->partition = pivot_label;
+    assert ((*clause)->partition != UNDEF);
 
 POST_PROCESS_RESOLVED_CHAIN:
 
 #ifdef BOOLEFORCE_LOG
-  if (verbose > 1)
-  {
-    fprintf (output, VPFX "checked clause %d: ", (*clause)->idx);
-    printnl_ints ((*clause)->literals);
-  }
+    if (verbose > 1) {
+        fprintf (output, VPFX "checked clause %d: ", (*clause)->idx);
+        printnl_ints ((*clause)->literals);
+    }
 #endif
 
-  if (!(*clause)->antecedents)
-  {
-    if (bintrace)
-      print_clause (*clause, 0, bintrace);
+    if (!(*clause)->antecedents) {
+        if (bintrace)
+            print_clause (*clause, 0, bintrace);
 
-    if (ebintrace)
-      print_clause (*clause, 1, ebintrace);
-  }
+        if (ebintrace)
+            print_clause (*clause, 1, ebintrace);
+    }
 
-  if (dotgraph)
-    fprintf (dotgraph, "n_%d [label=\"%d\"];\n", (*clause)->idx,
-        (*clause)->partition);
-      
+    if (dotgraph)
+        fprintf (dotgraph, "n_%d [label=\"%d\"];\n", (*clause)->idx,
+                 (*clause)->partition);
+
 #ifndef NDEBUG
-  (*clause)->resolved = 1;
+    (*clause)->resolved = 1;
 #endif
 
-  return 1;
+    return 1;
 }
 
-  static void
+static void
 mark_resolvent (Clause * clause)
 {
-  int *p, idx;
+    int *p, idx;
 
-  for (p = clause->literals; (idx = *p); p++)
-  {
-    assert (!literals[idx].mark);
-    literals[idx].mark = 1;
-  }
+    for (p = clause->literals; (idx = *p); p++) {
+        assert (!literals[idx].mark);
+        literals[idx].mark = 1;
+    }
 }
 
-  static void
+static void
 unmark_resolvent (Clause * clause)
 {
-  int *p, idx;
+    int *p, idx;
 
-  for (p = clause->literals; (idx = *p); p++)
-  {
-    assert (literals[idx].mark);
-    literals[idx].mark = 0;
-  }
+    for (p = clause->literals; (idx = *p); p++) {
+        assert (literals[idx].mark);
+        literals[idx].mark = 0;
+    }
 }
 
-  static int
+static int
 rnd_up_pow2 (int v)
 {
-  v--;
-  v |= v >> 1;
-  v |= v >> 2;
-  v |= v >> 4;
-  v |= v >> 8;
-  v |= v >> 16;
-  v++;
-  return v;
+    v--;
+    v |= v >> 1;
+    v |= v >> 2;
+    v |= v >> 4;
+    v |= v >> 8;
+    v |= v >> 16;
+    v++;
+    return v;
 }
 
 
-  static simpaig *
+static simpaig *
 compute_m (Clause * clause)
 {
-  int *p, idx, len, input_count, iterations;
-  simpaig **tmp, *ret_val;
+    int *p, idx, len, input_count, iterations;
+    simpaig **tmp, *ret_val;
 
-  len = length_ints (clause->literals);
-  // TODO use realloc and maybe booleforce mem managment
-  tmp = malloc(len * sizeof (circuit_components_m[0]));
-  if(tmp != NULL)
-  {
-    circuit_components_m = tmp;
-    // TODO len isn't the actual number of components
-    //      iterations after loops is
-    //    count_circuit_components_m = len;
-  }
-
-  iterations = 0;
-  for (p = clause->literals; (idx = *p); p++)
-  {
-    if (!literals[idx].mark)
-    {
-      circuit_components_m[iterations++] = literals[idx].aig;
-
-      // Set mark to 2, in order not to add lits twice
-      literals[idx].mark = 2;
+    len = length_ints (clause->literals);
+    // TODO use realloc and maybe booleforce mem managment
+    tmp = malloc(len * sizeof (circuit_components_m[0]));
+    if(tmp != NULL) {
+        circuit_components_m = tmp;
+        // TODO len isn't the actual number of components
+        //      iterations after loops is
+        //    count_circuit_components_m = len;
     }
-  }
-  // Reset the literals just marked, so not to bleed into the context
-  for (p = clause->literals; (idx = *p); p++)
-  {
-    if(literals[idx].mark == 2)
-      literals[idx].mark = 0;
-  }
 
-  input_count = rnd_up_pow2 (iterations);
-  count_circuit_components_m = iterations;
-  gates += (iterations - 1);
-  ret_val = build_circuit_rec_m (input_count, simpaig_or, simpaig_false (mgr));
-  assert (count_circuit_components_m == 0);
-  free (circuit_components_m);
-  return ret_val;
+    iterations = 0;
+    for (p = clause->literals; (idx = *p); p++) {
+        if (!literals[idx].mark) {
+            circuit_components_m[iterations++] = literals[idx].aig;
+
+            // Set mark to 2, in order not to add lits twice
+            literals[idx].mark = 2;
+        }
+    }
+    // Reset the literals just marked, so not to bleed into the context
+    for (p = clause->literals; (idx = *p); p++) {
+        if(literals[idx].mark == 2)
+            literals[idx].mark = 0;
+    }
+
+    input_count = rnd_up_pow2 (iterations);
+    count_circuit_components_m = iterations;
+    gates += (iterations - 1);
+    ret_val = build_circuit_rec_m (input_count, simpaig_or, simpaig_false (mgr));
+    assert (count_circuit_components_m == 0);
+    free (circuit_components_m);
+    return ret_val;
 }
 
 /*------------------------------------------------------------------------*/
 /* expand, copyaig, next_symbol taken from aigunroll.c to copy simpaig data
  * structure into aiger data structure, which allows to print the AIG.
  */
-  static const char *
+static const char *
 next_symbol (unsigned idx)
 {
-  unsigned len;
+    unsigned len;
 
-  len = 50;
+    len = 50;
 
-  if (size_outbuffer < len)
-  {
-    if (size_outbuffer)
-    {
-      while (size_outbuffer < len)
-        size_outbuffer *= 2;
+    if (size_outbuffer < len) {
+        if (size_outbuffer) {
+            while (size_outbuffer < len)
+                size_outbuffer *= 2;
 
-      outbuffer = realloc (outbuffer, size_outbuffer);
+            outbuffer = realloc (outbuffer, size_outbuffer);
+        } else
+            outbuffer = malloc (size_outbuffer = len);
     }
-    else
-      outbuffer = malloc (size_outbuffer = len);
-  }
 
-  sprintf (outbuffer, "x%u", idx);
+    sprintf (outbuffer, "x%u", idx);
 
-  return outbuffer;
+    return outbuffer;
 }
 
-  static void
+static void
 copyaig (simpaig * aig)
 {
-  Literal *aig_input;
-  simpaig *c0, *c1;
-  const char *name;
-  unsigned idx;
+    Literal *aig_input;
+    simpaig *c0, *c1;
+    const char *name;
+    unsigned idx;
 
-  assert (aig);
+    assert (aig);
 
-  aig = simpaig_strip (aig);
-  idx = simpaig_index (aig);
-  if (!idx || aigs[idx])
-    return;
+    aig = simpaig_strip (aig);
+    idx = simpaig_index (aig);
+    if (!idx || aigs[idx])
+        return;
 
-  aigs[idx] = aig;
-  if (simpaig_isand (aig))
-  {
-    ands++;
-    c0 = simpaig_child (aig, 0);
-    c1 = simpaig_child (aig, 1);
-    copyaig (c0);
-    copyaig (c1);
-    aiger_add_and (output_aig,
-        2 * idx, // lhs
-        simpaig_unsigned_index (c0), // rhs1
-        simpaig_unsigned_index (c1)); // rhs2
-  }
-  else
-  {
-    name = 0;
-    aig_input = simpaig_isvar (aig);
-    name = next_symbol (aig_input->idx);
-    aiger_add_input (output_aig, 2 * idx, name);
-  }
+    aigs[idx] = aig;
+    if (simpaig_isand (aig)) {
+        ands++;
+        c0 = simpaig_child (aig, 0);
+        c1 = simpaig_child (aig, 1);
+        copyaig (c0);
+        copyaig (c1);
+        aiger_add_and (output_aig,
+                       2 * idx, // lhs
+                       simpaig_unsigned_index (c0), // rhs1
+                       simpaig_unsigned_index (c1)); // rhs2
+    } else {
+        name = 0;
+        aig_input = simpaig_isvar (aig);
+        name = next_symbol (aig_input->idx);
+        aiger_add_input (output_aig, 2 * idx, name);
+    }
 }
 
-  static void
+static void
 expand (simpaig * aig)
 {
-  unsigned maxvar;
-  simpaig_assign_indices (mgr, aig);
-  maxvar = simpaig_max_index (mgr);
-  aigs = calloc (maxvar + 1, sizeof aigs[0]);
-  copyaig (aig);
-  aiger_add_output (output_aig, simpaig_unsigned_index (aig), 0);
-  free (aigs);
-  simpaig_reset_indices (mgr);
-  free (outbuffer);
-  size_outbuffer = 0;
+    unsigned maxvar;
+    simpaig_assign_indices (mgr, aig);
+    maxvar = simpaig_max_index (mgr);
+    aigs = calloc (maxvar + 1, sizeof aigs[0]);
+    copyaig (aig);
+    aiger_add_output (output_aig, simpaig_unsigned_index (aig), 0);
+    free (aigs);
+    simpaig_reset_indices (mgr);
+    free (outbuffer);
+    size_outbuffer = 0;
 }
 
 
 #ifndef NDEBUG
 
-  static simpaig *
+static simpaig *
 compute_cl (Clause * clause)
 {
-  int *p, idx;
-  simpaig * cl, * tmp;
+    int *p, idx;
+    simpaig * cl, * tmp;
 
-  cl = simpaig_false (mgr);
+    cl = simpaig_false (mgr);
 
-  for (p = clause->literals; (idx = *p); p++)
-  {
-    tmp = simpaig_or (mgr, cl, literals[idx].aig);
-    cl = tmp;
-  }
+    for (p = clause->literals; (idx = *p); p++) {
+        tmp = simpaig_or (mgr, cl, literals[idx].aig);
+        cl = tmp;
+    }
 
-  return cl;
+    return cl;
 }
 
-  static int
+static int
 compute_partition_aigs (Clause * clause)
 {
-  simpaig * cl, * tmp;
+    simpaig * cl, * tmp;
 
-  if (clause->antecedents)
+    if (clause->antecedents)
+        return 1;
+
+    cl = compute_cl (clause);
+    if (clause->partition == A) {
+        tmp = simpaig_and (mgr, partition_a, cl);
+        partition_a = tmp;
+    } else if (clause->partition == B) {
+        tmp = simpaig_and (mgr, partition_b, cl);
+        partition_b = tmp;
+    } else
+        return check_error("Initial vertices either in A or B");
+
     return 1;
-
-  cl = compute_cl (clause);
-  if (clause->partition == A)
-  {
-    tmp = simpaig_and (mgr, partition_a, cl);
-    partition_a = tmp;
-  }
-  else if (clause->partition == B)
-  {
-    tmp = simpaig_and (mgr, partition_b, cl);
-    partition_b = tmp;
-  }
-  else
-    return check_error("Initial vertices either in A or B");
-  
-  return 1;
 }
 
-  static simpaig*
+static simpaig*
 compute_upward_projection (Clause * clause, short label)
 {
-  int *p, idx;
-  simpaig * cl, * tmp;
+    int *p, idx;
+    simpaig * cl, * tmp;
 
-  cl = simpaig_false (mgr);
+    cl = simpaig_false (mgr);
 
-  for (p = clause->literals; (idx = *p); p++)
-  {
-    if ((label & literals[idx].partition) != 0)
-    {
-      tmp = simpaig_or (mgr, cl, literals[idx].aig);
-      cl = tmp;
+    for (p = clause->literals; (idx = *p); p++) {
+        if ((label & literals[idx].partition) != 0) {
+            tmp = simpaig_or (mgr, cl, literals[idx].aig);
+            cl = tmp;
+        }
     }
-  }
-  return cl;
+    return cl;
 }
 
-  static int
+static int
 check_interpolation_invariant (simpaig *invariant)
 {
-  int sat_result;
-  FILE *file; 
+    int sat_result;
+    FILE *file;
 
-  output_aig = aiger_init ();
-  expand (invariant);
-  file = booleforce_open_file_for_writing ("sanity.aig");
-  aiger_write_to_file (output_aig, aiger_binary_mode, file);
-  booleforce_close_file (file);
-  aiger_reset (output_aig);
-  // TODO paths / system()
-  system("~/tools/aiger-1.9.4/aigtocnf sanity.aig > sanity.cnf");
-  sat_result = system("~/tools/picosat-959/picosat -n sanity.cnf > /dev/null"); 
-  // Note: return code 10 == sat, 20 == unsat
-  if(sat_result >> 8 != 20)
-    return 0;
-  return 1;
+    output_aig = aiger_init ();
+    expand (invariant);
+    file = booleforce_open_file_for_writing (SANITY_AIG);
+    aiger_write_to_file (output_aig, aiger_binary_mode, file);
+    booleforce_close_file (file);
+    aiger_reset (output_aig);
+    // TODO paths / system()
+    system(AIGTOCNF_PATH " " SANITY_AIG " > " SANITY_CNF);
+    sat_result = system(PICOSAT_PATH " -n " SANITY_CNF " > /dev/null");
+    // Note: return code 10 == sat, 20 == unsat
+    if(sat_result >> 8 != 20)
+        return 0;
+    return 1;
 }
 
 #endif
 
 
-  static int
+static int
 compute_itp (Clause * clause)
 {
-  int *p, idx, iterations, len, input_count;
-  Clause *antecedent;
-  simpaig *m, **tmp;
+    int *p, idx, iterations, len, input_count;
+    Clause *antecedent;
+    simpaig *m, **tmp;
 
-  if (!clause->antecedents)
-    return 1;
+    if (!clause->antecedents)
+        return 1;
 
-  len = length_ints(clause->antecedents);
+    len = length_ints(clause->antecedents);
 
-  // TODO use realloc and maybe booleforce mem managment
-  tmp = malloc(len * sizeof (circuit_components_itp[0]));
-  if(tmp != NULL)
-  {
-    circuit_components_itp = tmp;
-    count_circuit_components_itp = len;
-  }
-
-  assert (clause->antecedents);
-  p = clause->antecedents;
-
-  iterations = 0;
-  while ((idx = *p++))
-  {
-    antecedent = idx2clause (idx);
-    assert (antecedent);
-    assert (antecedent->itp);
-    if (clause->partition == AB)
-    {
-      mark_resolvent (clause);
-      m = compute_m (antecedent);
-      // conjunction of I_i \vee M_i
-      if(itp_system_strength == 1)
-      {
-        circuit_components_itp[iterations] = simpaig_or (mgr, antecedent->itp, m);
-        gates++;
-      }
-      else
-      {
-        circuit_components_itp[iterations] = simpaig_and(mgr, antecedent->itp, simpaig_not(m));
-        gates++;
-      }
-      unmark_resolvent (clause);
+    // TODO use realloc and maybe booleforce mem managment
+    tmp = malloc(len * sizeof (circuit_components_itp[0]));
+    if(tmp != NULL) {
+        circuit_components_itp = tmp;
+        count_circuit_components_itp = len;
     }
-    else if (clause->partition == A)
-      circuit_components_itp[iterations] = antecedent->itp;
-    else if (clause->partition == B)
-      circuit_components_itp[iterations] = antecedent->itp;
+
+    assert (clause->antecedents);
+    p = clause->antecedents;
+
+    iterations = 0;
+    while ((idx = *p++)) {
+        antecedent = idx2clause (idx);
+        assert (antecedent);
+        assert (antecedent->itp);
+        if (clause->partition == AB) {
+            mark_resolvent (clause);
+            m = compute_m (antecedent);
+            // conjunction of I_i \vee M_i
+            if(itp_system_strength == 1) {
+                circuit_components_itp[iterations] = simpaig_or (mgr, antecedent->itp, m);
+                gates++;
+            } else {
+                circuit_components_itp[iterations] = simpaig_and(mgr, antecedent->itp, simpaig_not(m));
+                gates++;
+            }
+            unmark_resolvent (clause);
+        } else if (clause->partition == A)
+            circuit_components_itp[iterations] = antecedent->itp;
+        else if (clause->partition == B)
+            circuit_components_itp[iterations] = antecedent->itp;
+        else
+            return check_error ("chain pivots have to be labelled A, B, or AB");
+
+        iterations++;
+    }
+    input_count = rnd_up_pow2 (len);
+
+    if (clause->partition == B ||
+            (clause->partition == AB && itp_system_strength == 1))
+        clause->itp = build_circuit_rec_itp (input_count, simpaig_and, simpaig_true (mgr));
+    else if (clause->partition == A ||
+             (clause->partition == AB && itp_system_strength == 2))
+        clause->itp = build_circuit_rec_itp (input_count, simpaig_or, simpaig_false (mgr));
     else
-      return check_error ("chain pivots have to be labelled A, B, or AB");
+        return check_error ("that itp system does not exist.");
 
-    iterations++;
-  }
-  input_count = rnd_up_pow2 (len);
+    num_derived_clauses_after_split++;
+    num_antecedents_after += iterations;
+    gates += (len - 1);
 
-  if (clause->partition == B ||
-       (clause->partition == AB && itp_system_strength == 1))
-    clause->itp = build_circuit_rec_itp (input_count, simpaig_and, simpaig_true (mgr));
-  else if (clause->partition == A ||
-       (clause->partition == AB && itp_system_strength == 2))
-    clause->itp = build_circuit_rec_itp (input_count, simpaig_or, simpaig_false (mgr));
-  else
-    return check_error ("that itp system does not exist.");
-
-  num_derived_clauses_after_split++;
-  num_antecedents_after += iterations;
-  gates += (len - 1);
-
-  assert (count_circuit_components_itp == 0);
-  free(circuit_components_itp);
+    assert (count_circuit_components_itp == 0);
+    free(circuit_components_itp);
 
 #ifndef NDEBUG
-  // Note: remove to check invariant for all chains, 
-  if(clause->idx != empty_cls_idx)
-    return 1;
+    // Note: remove to check invariant for all chains,
+    if(clause->idx != empty_cls_idx)
+        return 1;
 
-  simpaig *sanity_tmp, *invariant;
+    simpaig *sanity_tmp, *invariant;
 
-  sanity_tmp = simpaig_and(mgr, partition_a, simpaig_not(clause->itp));
-  invariant = simpaig_and(mgr, sanity_tmp, simpaig_not(compute_upward_projection(clause, A)));
-  if (!check_interpolation_invariant(invariant))
-    return check_error("violated itp invariant in clause %d\n", clause->idx);
-  simpaig_dec (mgr, sanity_tmp);
-  simpaig_dec (mgr, invariant);
+    sanity_tmp = simpaig_and(mgr, partition_a, simpaig_not(clause->itp));
+    invariant = simpaig_and(mgr, sanity_tmp, simpaig_not(compute_upward_projection(clause, A)));
+    if (!check_interpolation_invariant(invariant))
+        return check_error("violated itp invariant in clause %d\n", clause->idx);
+    simpaig_dec (mgr, sanity_tmp);
+    simpaig_dec (mgr, invariant);
 
-  sanity_tmp = simpaig_and(mgr, partition_b, clause->itp);
-  invariant = simpaig_and(mgr, sanity_tmp, simpaig_not(compute_upward_projection(clause, B)));
-  if (!check_interpolation_invariant(invariant))
-    return check_error("violated itp invariant in clause %d\n", clause->idx);
-  simpaig_dec (mgr, sanity_tmp);
-  simpaig_dec (mgr, invariant);
+    sanity_tmp = simpaig_and(mgr, partition_b, clause->itp);
+    invariant = simpaig_and(mgr, sanity_tmp, simpaig_not(compute_upward_projection(clause, B)));
+    if (!check_interpolation_invariant(invariant))
+        return check_error("violated itp invariant in clause %d\n", clause->idx);
+    simpaig_dec (mgr, sanity_tmp);
+    simpaig_dec (mgr, invariant);
 
-  printf("OKAY: partial interpolant @ clause %d\n", clause->idx); 
+    printf("OKAY: partial interpolant @ clause %d\n", clause->idx);
 
 #endif
 
 
-  return 1;
+    return 1;
 }
 
 /*------------------------------------------------------------------------*/
 
-  static int
+static int
 copy_resolvent_in_reverse_order_as_antecedents (Clause * clause)
 {
-  int *p, l;
+    int *p, l;
 
-  l = length_ints (clause->antecedents);
-  assert (count_resolvent <= l);
+    l = length_ints (clause->antecedents);
+    assert (count_resolvent <= l);
 
-  if (count_resolvent < l)
-  {
-    if (lax)
-    {
-      booleforce_delete_ints (clause->antecedents);
-      BOOLEFORCE_NEW_ARRAY (clause->antecedents, count_resolvent + 1);
-      clause->antecedents[count_resolvent] = 0;
+    if (count_resolvent < l) {
+        if (lax) {
+            booleforce_delete_ints (clause->antecedents);
+            BOOLEFORCE_NEW_ARRAY (clause->antecedents, count_resolvent + 1);
+            clause->antecedents[count_resolvent] = 0;
+        } else
+            return check_error ("%d antecedents in clause %d can not be resolved",
+                                l - count_resolvent, clause->idx);
     }
-    else
-      return check_error ("%d antecedents in clause %d can not be resolved",
-          l - count_resolvent, clause->idx);
-  }
 
-  p = clause->antecedents;
-  while (count_resolvent)
-    *p++ = pop_resolvent ();
+    p = clause->antecedents;
+    while (count_resolvent)
+        *p++ = pop_resolvent ();
 
-  return 1;
+    return 1;
 }
 
 /*------------------------------------------------------------------------*/
 
-  inline static int
+inline static int
 deref (int idx)
 {
-  return literals[idx].mark;
+    return literals[idx].mark;
 }
 
 /*------------------------------------------------------------------------*/
 
-  inline static void
+inline static void
 enqueue (int idx, int reason)
 {
-  assert (deref (idx) == UNKNOWN);
-  push_stack (idx);
-  push_stack (reason);
+    assert (deref (idx) == UNKNOWN);
+    push_stack (idx);
+    push_stack (reason);
 
 #ifdef BOOLEFORCE_LOG
-  if (verbose > 1)
-    LOG ("enqueue %d with reason %d", idx, reason);
+    if (verbose > 1)
+        LOG ("enqueue %d with reason %d", idx, reason);
 #endif
 }
 
 /*------------------------------------------------------------------------*/
 
-  inline static void
+inline static void
 assign (int idx, int reason)
 {
-  (void) reason;
+    (void) reason;
 
-  assert (deref (idx) == UNKNOWN);
+    assert (deref (idx) == UNKNOWN);
 
-  literals[idx].mark = TRUE;
-  literals[-idx].mark = FALSE;
+    literals[idx].mark = TRUE;
+    literals[-idx].mark = FALSE;
 
-  push_trail (idx);
+    push_trail (idx);
 
 #ifdef BOOLEFORCE_LOG
-  if (verbose > 1)
-    LOG ("assigned %d with reason %d", idx, reason);
+    if (verbose > 1)
+        LOG ("assigned %d with reason %d", idx, reason);
 #endif
 }
 
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 untrail (void)
 {
-  int idx;
+    int idx;
 
-  while (count_trail)
-  {
-    idx = pop_trail ();
-    literals[idx].mark = UNKNOWN;
-    literals[-idx].mark = UNKNOWN;
-  }
+    while (count_trail) {
+        idx = pop_trail ();
+        literals[idx].mark = UNKNOWN;
+        literals[-idx].mark = UNKNOWN;
+    }
 }
 
 /*------------------------------------------------------------------------*/
 /* Visit a clause in which one watched literal became false.  Return a non
  * zero value iff the watched literal should not be watched anymore.
  */
-  inline static int
+inline static int
 visit (Clause * clause)
 {
-  int *p, *q, false_literal_pos, idx0, idx1, tmp0, tmp1, idx, label, tmp;
+    int *p, *q, false_literal_pos, idx0, idx1, tmp0, tmp1, idx, label, tmp;
 
-  p = clause->literals;
+    p = clause->literals;
 
-  idx0 = p[0];
-  assert (idx0);
+    idx0 = p[0];
+    assert (idx0);
 
-  idx1 = p[1];
-  assert (idx1);
+    idx1 = p[1];
+    assert (idx1);
 
-  tmp0 = deref (idx0);
-  tmp1 = deref (idx1);
+    tmp0 = deref (idx0);
+    tmp1 = deref (idx1);
 
-  if (tmp0 == TRUE || tmp1 == TRUE)	/* ignore satisfied clauses */
-    return 0;			/* keep old watch */
+    if (tmp0 == TRUE || tmp1 == TRUE)	/* ignore satisfied clauses */
+        return 0;			/* keep old watch */
 
-  if (tmp0 == FALSE && tmp1 == FALSE)	/* ignore conflicts */
-    return 0;			/* keep old watch */
+    if (tmp0 == FALSE && tmp1 == FALSE)	/* ignore conflicts */
+        return 0;			/* keep old watch */
 
-  /* exactly one watched literal is unknown and the other false
-   */
-  assert (tmp0 == UNKNOWN || tmp1 == UNKNOWN);
-  assert (tmp0 == FALSE || tmp1 == FALSE);
+    /* exactly one watched literal is unknown and the other false
+     */
+    assert (tmp0 == UNKNOWN || tmp1 == UNKNOWN);
+    assert (tmp0 == FALSE || tmp1 == FALSE);
 
-  q = p + 2;
+    q = p + 2;
 
-  false_literal_pos = (tmp1 == FALSE);
+    false_literal_pos = (tmp1 == FALSE);
 
-  while ((idx = *q))
-  {
-    tmp = deref (idx);
-    if (tmp != FALSE)
-    {
-      label = clause->labels[q - clause->literals];
+    while ((idx = *q)) {
+        tmp = deref (idx);
+        if (tmp != FALSE) {
+            label = clause->labels[q - clause->literals];
 
-      *q = p[false_literal_pos];
-      p[false_literal_pos] = idx;
-      
-      clause->labels[q - clause->literals] = clause->labels[false_literal_pos];
-      clause->labels[false_literal_pos] = label;
+            *q = p[false_literal_pos];
+            p[false_literal_pos] = idx;
 
-      CONS (literals[idx].clauses, clause);
+            clause->labels[q - clause->literals] = clause->labels[false_literal_pos];
+            clause->labels[false_literal_pos] = label;
 
-      return 1;		/* remove old watch */
+            CONS (literals[idx].clauses, clause);
+
+            return 1;		/* remove old watch */
+        }
+
+        q++;
     }
 
-    q++;
-  }
+    enqueue (p[!false_literal_pos], clause->idx);
 
-  enqueue (p[!false_literal_pos], clause->idx);
-
-  return 0;			/* keep old watch */
+    return 0;			/* keep old watch */
 }
 
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 bcp (int idx)
 {
-  Cell *this, **prev, *next;
-  Clause *clause;
-  Literal *lit;
+    Cell *this, **prev, *next;
+    Clause *clause;
+    Literal *lit;
 
-  lit = literals + idx;
-  prev = &lit->clauses;
+    lit = literals + idx;
+    prev = &lit->clauses;
 
-  for (this = *prev; this; this = next)
-  {
-    next = cdr (this);
-    clause = car (this);
+    for (this = *prev; this; this = next) {
+        next = cdr (this);
+        clause = car (this);
 
-    if (visit (clause))
-    {
-      *prev = next;		/* dequeue this watch */
-      recycle_cell (this);
+        if (visit (clause)) {
+            *prev = next;		/* dequeue this watch */
+            recycle_cell (this);
+        } else
+            prev = &this->tail;	/* keep old watch */
     }
-    else
-      prev = &this->tail;	/* keep old watch */
-  }
 }
 
 /*------------------------------------------------------------------------*/
@@ -3087,113 +2973,103 @@ bcp (int idx)
  * assignment, is ordered next in the new antecedent order (actually in
  * reverse order).
  */
-  static int
+static int
 linearize (Clause * clause)
 {
-  int *p, antecedent_idx, idx, idx0, idx1, reason, tmp;
-  Clause *antecedent;
+    int *p, antecedent_idx, idx, idx0, idx1, reason, tmp;
+    Clause *antecedent;
 
-  if (!clause->antecedents)
-    return 1;
+    if (!clause->antecedents)
+        return 1;
 
-#ifdef BOOLEFORCE_LOG
-  if (verbose > 1)
-    LOG ("linearizing antecedents of clause %d", clause->idx);
-#endif
-
-  assert (clause->antecedents);
-  if (!clause->antecedents[0] ||
-      !clause->antecedents[1] || !clause->antecedents[2])
-  {
 #ifdef BOOLEFORCE_LOG
     if (verbose > 1)
-      LOG ("clause %d has not more than two antecedents", clause->idx);
+        LOG ("linearizing antecedents of clause %d", clause->idx);
 #endif
+
+    assert (clause->antecedents);
+    if (!clause->antecedents[0] ||
+            !clause->antecedents[1] || !clause->antecedents[2]) {
+#ifdef BOOLEFORCE_LOG
+        if (verbose > 1)
+            LOG ("clause %d has not more than two antecedents", clause->idx);
+#endif
+
+        return 1;
+    }
+
+    assert (!count_stack);
+
+    /* Watch the first two literals in all antecedents and enqueue units.
+     */
+    for (p = clause->antecedents; (antecedent_idx = *p); p++) {
+        antecedent = idx2clause (antecedent_idx);
+
+        idx0 = antecedent->literals[0];
+        assert (idx0);
+
+        idx1 = antecedent->literals[1];
+        if (idx1) {
+            CONS (literals[idx0].clauses, antecedent);
+            CONS (literals[idx1].clauses, antecedent);
+        } else
+            enqueue (idx0, antecedent_idx);	/* unit antecedent */
+    }
+
+    /* Enqueue the negation of the resolvent of this chain.
+     */
+    for (p = clause->literals; (idx = *p); p++)
+        enqueue (-idx, 0);
+
+    /* bcp until conflict is found
+     */
+    conflict_occurred = 0;
+    assert (!count_resolvent);
+    while (count_stack && !conflict_occurred) {
+        reason = pop_stack ();	/* DFS BCP */
+        idx = pop_stack ();
+        tmp = deref (idx);
+        if (tmp == FALSE) {
+            count_stack = 0;
+        } else if (tmp == UNKNOWN) {
+            assign (idx, reason);
+            bcp (-idx);
+        } else
+            reason = 0;
+
+        if (!reason)
+            continue;
+
+        push_resolvent (reason);
+#ifdef BOOLEFORCE_LOG
+        if (verbose > 1)
+            LOG ("new antecedent %d", reason);
+#endif
+    }
+
+    untrail ();
+    count_stack = 0;
+
+    /* Recycle Cells.
+     */
+    for (p = clause->antecedents; (antecedent_idx = *p); p++) {
+        antecedent = idx2clause (antecedent_idx);
+
+        idx0 = antecedent->literals[0];
+        assert (idx0);
+
+        idx1 = antecedent->literals[1];
+        if (!idx1)
+            continue;
+
+        RECYCLE_CELLS (literals[idx0].clauses);
+        RECYCLE_CELLS (literals[idx1].clauses);
+    }
+
+    if (!copy_resolvent_in_reverse_order_as_antecedents (clause))
+        return 0;
 
     return 1;
-  }
-
-  assert (!count_stack);
-
-  /* Watch the first two literals in all antecedents and enqueue units.
-   */
-  for (p = clause->antecedents; (antecedent_idx = *p); p++)
-  {
-    antecedent = idx2clause (antecedent_idx);
-
-    idx0 = antecedent->literals[0];
-    assert (idx0);
-
-    idx1 = antecedent->literals[1];
-    if (idx1)
-    {
-      CONS (literals[idx0].clauses, antecedent);
-      CONS (literals[idx1].clauses, antecedent);
-    }
-    else
-      enqueue (idx0, antecedent_idx);	/* unit antecedent */
-  }
-
-  /* Enqueue the negation of the resolvent of this chain.
-   */
-  for (p = clause->literals; (idx = *p); p++)
-    enqueue (-idx, 0);
-
-  /* bcp until conflict is found
-   */
-  conflict_occurred = 0;
-  assert (!count_resolvent);
-  while (count_stack && !conflict_occurred)
-  {
-    reason = pop_stack ();	/* DFS BCP */
-    idx = pop_stack ();
-    tmp = deref (idx);
-    if (tmp == FALSE)
-    {
-      count_stack = 0;
-    }
-    else if (tmp == UNKNOWN)
-    {
-      assign (idx, reason);
-      bcp (-idx);
-    }
-    else
-      reason = 0;
-
-    if (!reason)
-      continue;
-
-    push_resolvent (reason);
-#ifdef BOOLEFORCE_LOG
-    if (verbose > 1)
-      LOG ("new antecedent %d", reason);
-#endif
-  }
-
-  untrail ();
-  count_stack = 0;
-
-  /* Recycle Cells.
-   */
-  for (p = clause->antecedents; (antecedent_idx = *p); p++)
-  {
-    antecedent = idx2clause (antecedent_idx);
-
-    idx0 = antecedent->literals[0];
-    assert (idx0);
-
-    idx1 = antecedent->literals[1];
-    if (!idx1)
-      continue;
-
-    RECYCLE_CELLS (literals[idx0].clauses);
-    RECYCLE_CELLS (literals[idx1].clauses);
-  }
-
-  if (!copy_resolvent_in_reverse_order_as_antecedents (clause))
-    return 0;
-
-  return 1;
 }
 
 /*------------------------------------------------------------------------*/
@@ -3202,29 +3078,28 @@ linearize (Clause * clause)
  * the checker itself already reported an error message.  On success the
  * verbose message is printed
  */
-  static int
+static int
 forall_clauses (int (*checker) (Clause *), const char *verbose_msg)
 {
-  double start_time = booleforce_time_stamp ();
-  Clause *clause;
+    double start_time = booleforce_time_stamp ();
+    Clause *clause;
 
-  for (clause = first_in_order; clause; clause = clause->next_in_order)
-  {
+    for (clause = first_in_order; clause; clause = clause->next_in_order) {
 #ifndef NDEBUG
-    check_prestine_chain (clause);
+        check_prestine_chain (clause);
 #endif
 
-    if (!checker (clause))
-      return 0;
+        if (!checker (clause))
+            return 0;
 #ifndef NDEBUG
-    check_prestine_chain (clause);
+        check_prestine_chain (clause);
 #endif
-  }
+    }
 
-  if (verbose)
-    booleforce_report (start_time, output, VPFX "%s", verbose_msg);
+    if (verbose)
+        booleforce_report (start_time, output, VPFX "%s", verbose_msg);
 
-  return 1;
+    return 1;
 }
 
 /*------------------------------------------------------------------------*/
@@ -3233,279 +3108,267 @@ forall_clauses (int (*checker) (Clause *), const char *verbose_msg)
  * the checker itself already reported an error message.  On success the
  * verbose message is printed
  */
-  static int
+static int
 forall_clauses_mutable (int (*checker) (Clause **), const char *verbose_msg)
 {
-  double start_time = booleforce_time_stamp ();
-  Clause **clause;
+    double start_time = booleforce_time_stamp ();
+    Clause **clause;
 
-  for (clause = &first_in_order; *clause; clause = &(*clause)->next_in_order)
-  {
+    for (clause = &first_in_order; *clause; clause = &(*clause)->next_in_order) {
 #ifndef NDEBUG
-    check_prestine_chain (*clause);
+        check_prestine_chain (*clause);
 #endif
 
-    if (!checker (clause))
-      return 0;
+        if (!checker (clause))
+            return 0;
 #ifndef NDEBUG
-    check_prestine_chain (*clause);
+        check_prestine_chain (*clause);
 #endif
-  }
+    }
 
-  if (verbose)
-    booleforce_report (start_time, output, VPFX "%s", verbose_msg);
+    if (verbose)
+        booleforce_report (start_time, output, VPFX "%s", verbose_msg);
 
-  return 1;
+    return 1;
 }
 
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 generate_new_indices (void)
 {
-  double start_time = booleforce_time_stamp ();
-  int newidx, count;
-  Clause * clause;
+    double start_time = booleforce_time_stamp ();
+    int newidx, count;
+    Clause * clause;
 
-  newidx = min_derived_idx;
+    newidx = min_derived_idx;
 
-  if (max_original_idx > newidx)
-    newidx = max_original_idx + 1;
+    if (max_original_idx > newidx)
+        newidx = max_original_idx + 1;
 
-  for (clause = first_in_order; clause; clause = clause->next_in_order)
-  {
-    if (clause->antecedents)
-    {
-      count = length_ints (clause->antecedents);
-      assert (count > 0);
-      newidx += count - 1;
-      clause->newidx = newidx - 1;
+    for (clause = first_in_order; clause; clause = clause->next_in_order) {
+        if (clause->antecedents) {
+            count = length_ints (clause->antecedents);
+            assert (count > 0);
+            newidx += count - 1;
+            clause->newidx = newidx - 1;
+        } else
+            clause->newidx = clause->idx;
     }
-    else
-      clause->newidx = clause->idx;
-  }
 
-  if (verbose)
-    booleforce_report (start_time, output,
-        VPFX "mapped to %d new clause indices", newidx);
+    if (verbose)
+        booleforce_report (start_time, output,
+                           VPFX "mapped to %d new clause indices", newidx);
 }
 
 /*------------------------------------------------------------------------*/
 
-  static int
+static int
 check (void)
 {
-  if (!link_derived_clauses ())
-    return 0;
+    if (!link_derived_clauses ())
+        return 0;
 
-  find_roots ();
+    find_roots ();
 
-  if (!collect ())
-    return 0;
+    if (!collect ())
+        return 0;
 
-  if (!order ())
-    return 0;
+    if (!order ())
+        return 0;
 
-  // TODO use booleforce memory wrapper for aigs, to track mem usage
-  mgr = simpaig_init ();
+    // TODO use booleforce memory wrapper for aigs, to track mem usage
+    mgr = simpaig_init ();
 
-  init_literals ();
+    init_literals ();
 
-  forall_clauses (collect_literals, "literal collection");
+    forall_clauses (collect_literals, "literal collection");
 
-  init_aigs ();
+    init_aigs ();
 
-  if (!forall_clauses (normalize, "normalization"))
-    return 0;
+    if (!forall_clauses (normalize, "normalization"))
+        return 0;
 
-  init_cells ();
+    init_cells ();
 
-  if (assume_already_linearized)
-  {
-    if (verbose)
-      LOG ("skipping linearization");
-  }
-  else if (!forall_clauses (linearize, "linearization"))
-    return 0;
+    if (assume_already_linearized) {
+        if (verbose)
+            LOG ("skipping linearization");
+    } else if (!forall_clauses (linearize, "linearization"))
+        return 0;
 
-  if (bintrace || ebintrace || restrace || rpttrace)
-    generate_new_indices ();
+    if (bintrace || ebintrace || restrace || rpttrace)
+        generate_new_indices ();
 
-  if (restrace)
-    write_res_header ();
+    if (restrace)
+        write_res_header ();
 
-  if (rpttrace)
-    write_rpt_header ();
+    if (rpttrace)
+        write_rpt_header ();
 
-  if (dotgraph)
-    write_dotgraph_header ();
+    if (dotgraph)
+        write_dotgraph_header ();
 
-  num_derived_clauses_before_split = num_derived_clauses;
-  num_antecedents_before_split = num_antecedents;
-  init_max_cls_idx = max_cls_idx;
-  if (!forall_clauses_mutable (resolve_and_split, "resolution"))
-    return 0;
+    num_derived_clauses_before_split = num_derived_clauses;
+    num_antecedents_before_split = num_antecedents;
+    init_max_cls_idx = max_cls_idx;
+    if (!forall_clauses_mutable (resolve_and_split, "resolution"))
+        return 0;
 
 #ifndef NDEBUG
-  partition_a = simpaig_true (mgr);
-  partition_b = simpaig_true (mgr);
-  forall_clauses (compute_partition_aigs, "partition aigs");
+    partition_a = simpaig_true (mgr);
+    partition_b = simpaig_true (mgr);
+    forall_clauses (compute_partition_aigs, "partition aigs");
 #endif
 
-  if (interpolant)
-  {
-    if (!forall_clauses (compute_itp, "interpolation"))
-      return 0;
-  }
+    if (interpolant) {
+        if (!forall_clauses (compute_itp, "interpolation"))
+            return 0;
+    }
 
-  if (!forall_clauses (merge_literals_count, "merge_literals_count"))
-    return 0;
+    if (!forall_clauses (merge_literals_count, "merge_literals_count"))
+        return 0;
 
-  if (!forall_clauses (split_clauses_count, "split_clauses_count"))
-    return 0;
-
+    if (!forall_clauses (split_clauses_count, "split_clauses_count"))
+        return 0;
 
 
-  return 1;
+
+    return 1;
 }
 
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 print_stats (void)
 {
-  float mem_usage;
-  double avg, seconds;
-  avg = 0.0f;
-  fprintf (stats_file, "%s;%d;%d", input_name, partition_split, itp_system_strength);
+    float mem_usage;
+    double avg, seconds;
+    avg = 0.0f;
+    fprintf (stats_file, "%s;%d;%d", input_name, partition_split, itp_system_strength);
 
-  avg = AVG(num_antecedents_before_split, num_derived_clauses_before_split);
-  fprintf (stats_file, ";%d;%.2f;%d", num_derived_clauses_before_split, avg, num_merge_literals);
+    avg = AVG(num_antecedents_before_split, num_derived_clauses_before_split);
+    fprintf (stats_file, ";%d;%.2f;%d", num_derived_clauses_before_split, avg, num_merge_literals);
 
-  fprintf (stats_file, ";%d;%d", num_splits, num_split_clauses);
+    fprintf (stats_file, ";%d;%d", num_splits, num_split_clauses);
 
-  avg = AVG(num_antecedents_after, num_derived_clauses_after_split);
-  fprintf (stats_file, ";%d;%.2f;%d;%d;%d", num_derived_clauses_after_split, avg, num_merge_literals_after, gates, ands);
+    avg = AVG(num_antecedents_after, num_derived_clauses_after_split);
+    fprintf (stats_file, ";%d;%.2f;%d;%d;%d", num_derived_clauses_after_split, avg, num_merge_literals_after, gates, ands);
 
-  seconds = booleforce_time_stamp () - entered_time;
-  mem_usage = (float) booleforce_max_bytes() / (double) (1 << 20);
-  fprintf (stats_file, ";%.2f;%.2f\n", seconds, mem_usage);
+    seconds = booleforce_time_stamp () - entered_time;
+    mem_usage = (float) booleforce_max_bytes() / (double) (1 << 20);
+    fprintf (stats_file, ";%.2f;%.2f\n", seconds, mem_usage);
 }
 
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 release_literals (void)
 {
-  int i;
+    int i;
 
-  for (i = -max_lit_idx; i <= max_lit_idx; i++)
-  {
-    // TODO simpaig_dec final_itp should take care of this
-    //if (i > 0)
-      //simpaig_dec (mgr, literals[i].aig); // dec variables
+    for (i = -max_lit_idx; i <= max_lit_idx; i++) {
+        // TODO simpaig_dec final_itp should take care of this
+        //if (i > 0)
+        //simpaig_dec (mgr, literals[i].aig); // dec variables
 
-    RECYCLE_CELLS (literals[i].clauses);
-  }
+        RECYCLE_CELLS (literals[i].clauses);
+    }
 
-  literals -= max_lit_idx;
-  BOOLEFORCE_DELETE_ARRAY (literals, 2 * max_lit_idx + 1);
+    literals -= max_lit_idx;
+    BOOLEFORCE_DELETE_ARRAY (literals, 2 * max_lit_idx + 1);
 }
 
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 release_clauses (void)
 {
-  Clause *clause;
-  int i;
+    Clause *clause;
+    int i;
 
-  for (i = 1; i < size_clauses; i++)
-    if ((clause = clauses[i]))
-      delete_clause (clause);
+    for (i = 1; i < size_clauses; i++)
+        if ((clause = clauses[i]))
+            delete_clause (clause);
 
-  BOOLEFORCE_DELETE_ARRAY (clauses, size_clauses);
+    BOOLEFORCE_DELETE_ARRAY (clauses, size_clauses);
 }
 
 /*------------------------------------------------------------------------*/
 /* release all heap allocated memory
  */
-  static void
+static void
 release (void)
 {
-  release_trail ();
-  release_stack ();
-  release_roots ();
-  release_resolvent ();
-  release_labels ();
+    release_trail ();
+    release_stack ();
+    release_roots ();
+    release_resolvent ();
+    release_labels ();
 
-  if (cells)
-    BOOLEFORCE_DELETE_ARRAY (cells, size_cells);
+    if (cells)
+        BOOLEFORCE_DELETE_ARRAY (cells, size_cells);
 
-  release_clauses ();
+    release_clauses ();
 }
 
 /*------------------------------------------------------------------------*/
 /* reset all static variables
  */
-  static void
+static void
 reset (void)
 {
-  if (close_input)
-  {
-    booleforce_close_file (input);
-    close_input = 0;
-  }
+    if (close_input) {
+        booleforce_close_file (input);
+        close_input = 0;
+    }
 
-  if (bintrace)
-  {
-    booleforce_close_file (bintrace);
-    bintrace = 0;
-  }
+    if (etrace) {
+        booleforce_close_file (etrace);
+        etrace = 0;
+    }
 
-  if (ebintrace)
-  {
-    booleforce_close_file (ebintrace);
-    ebintrace = 0;
-  }
+    if (bintrace) {
+        booleforce_close_file (bintrace);
+        bintrace = 0;
+    }
 
-  if (rpttrace)
-  {
-    booleforce_close_file (rpttrace);
-    rpttrace = 0;
-  }
+    if (ebintrace) {
+        booleforce_close_file (ebintrace);
+        ebintrace = 0;
+    }
 
-  if (restrace)
-  {
-    booleforce_close_file (restrace);
-    restrace = 0;
-  }
+    if (rpttrace) {
+        booleforce_close_file (rpttrace);
+        rpttrace = 0;
+    }
 
-  if (dotgraph)
-  {
-    booleforce_close_file (dotgraph);
-    dotgraph = 0;
-  }
+    if (restrace) {
+        booleforce_close_file (restrace);
+        restrace = 0;
+    }
 
-  if (interpolant)
-  {
-    booleforce_close_file (interpolant);
-    interpolant = 0;
-  }
+    if (dotgraph) {
+        booleforce_close_file (dotgraph);
+        dotgraph = 0;
+    }
 
-  if (stats_file)
-  {
-    booleforce_close_file (stats_file);
-    stats_file = 0;
-  }
+    if (interpolant) {
+        booleforce_close_file (interpolant);
+        interpolant = 0;
+    }
 
-  booleforce_reset_mem ();
+    if (stats_file) {
+        booleforce_close_file (stats_file);
+        stats_file = 0;
+    }
 
-  if (close_output)
-  {
-    fclose (output);
-    close_output = 0;
-  }
+    booleforce_reset_mem ();
+
+    if (close_output) {
+        fclose (output);
+        close_output = 0;
+    }
 }
 
 /*------------------------------------------------------------------------*/
@@ -3513,81 +3376,79 @@ reset (void)
 #define STATEMACRO(state) \
   do { memset (&state, 0, sizeof(state)); } while (0)
 
-  static void
+static void
 clear_static_variables (void)
 {
-  assert (static_variables_are_dirty);
+    assert (static_variables_are_dirty);
 #include "tracecheck.states"
-  assert (!static_variables_are_dirty);
+    assert (!static_variables_are_dirty);
 }
 
 /*------------------------------------------------------------------------*/
 
-  static void
+static void
 init (void)
 {
-  double tmp = booleforce_time_stamp ();
+    double tmp = booleforce_time_stamp ();
 
-  if (static_variables_are_dirty)
-    clear_static_variables ();
+    if (static_variables_are_dirty)
+        clear_static_variables ();
 
-  entered_time = tmp;
+    entered_time = tmp;
 
-  output = stdout;
-  assert (!close_output);
+    output = stdout;
+    assert (!close_output);
 
-  static_variables_are_dirty = 1;
+    static_variables_are_dirty = 1;
 }
 
 /*------------------------------------------------------------------------*/
 
-  static int
+static int
 parse_header_of_original_dimacs_file (void)
 {
-  double start_time = booleforce_time_stamp ();
-  FILE * file;
-  int ch;
+    double start_time = booleforce_time_stamp ();
+    FILE * file;
+    int ch;
 
-  assert (original_cnf_file_name);
-  file = booleforce_open_file_for_reading (original_cnf_file_name);
+    assert (original_cnf_file_name);
+    file = booleforce_open_file_for_reading (original_cnf_file_name);
 
-  if (!file)
-    return parse_error ("can not read '%s'", original_cnf_file_name);
+    if (!file)
+        return parse_error ("can not read '%s'", original_cnf_file_name);
 
 SKIP:
-  ch = getc (file);
-  if (isspace (ch))
-    goto SKIP;
+    ch = getc (file);
+    if (isspace (ch))
+        goto SKIP;
 
-  if (ch == 'c')
-  {
-    while ((ch = getc (file)) != '\n' && ch != EOF)
-      ;
+    if (ch == 'c') {
+        while ((ch = getc (file)) != '\n' && ch != EOF)
+            ;
 
-    goto SKIP;
-  }
+        goto SKIP;
+    }
 
-  if (ch != 'p' ||
-      fscanf (file, 
-        " cnf %d %d",
-        &original_variables,
-        &original_clauses) != 2 ||
-      original_variables < 0 ||
-      original_clauses < 0)
-  {
+    if (ch != 'p' ||
+            fscanf (file,
+                    " cnf %d %d",
+                    &original_variables,
+                    &original_clauses) != 2 ||
+            original_variables < 0 ||
+            original_clauses < 0) {
+        booleforce_close_file (file);
+        return parse_error ("invalid header in '%s'", original_cnf_file_name);
+    }
+
     booleforce_close_file (file);
-    return parse_error ("invalid header in '%s'", original_cnf_file_name);
-  }
 
-  booleforce_close_file (file);
-
-  if (verbose)
-    booleforce_report (start_time, output,
-        VPFX "found 'p cnf %d %d' in '%s'",
-        original_variables, 
-        original_clauses, 
-        original_cnf_file_name);
-  return 1;
+    if (verbose)
+        booleforce_report (start_time, output,
+                           VPFX "found 'p cnf %d %d' in '%s'",
+                           original_variables,
+                           original_clauses,
+                           original_cnf_file_name);
+    return 1;
 }
 
 /*------------------------------------------------------------------------*/
@@ -3597,381 +3458,342 @@ SKIP:
 "\n" \
 "where <option> is one of the following:\n" \
 "\n" \
-"  -h                print this command line option summary\n" \
-"  --version         print this command line option summary\n" \
-"  --config          print configuration options\n" \
-"  --id              print CVS/RCS id\n" \
-"  -v[<inc>]         increase verbose level by <inc> (default 1)\n" \
-"  --linear          assume that chains are already linearized\n" \
-"  --lax             ignore multiple occurrences and left over antecedents\n" \
-"  --print           parse input file, print trace and exit\n" \
-"  --debug           enable internal consistency checking\n" \
-"  -e<idx>           first defined variable index in extended resolution trace\n" \
-"  -b <proof>        generate compact binary resolution trace\n" \
-"  -B <proof>        generate extended binary resolution trace\n" \
-"  -r <proof>        generate compact binary resolution trace in RPT format\n" \
-"  -R <proof>        generate extended binary resolution proof in RES format\n" \
+"  -h           print this command line option summary\n" \
+"  --version    print this command line option summary\n" \
+"  --config     print configuration options\n" \
+"  --id         print CVS/RCS id\n" \
+"  -v[<inc>]    increase verbose level by <inc> (default 1)\n" \
+"  --linear     assume that chains are already linearized\n" \
+"  --lax        ignore multiple occurrences and left over antecedents\n" \
+"  --print      parse input file, print trace and exit\n" \
+"  --debug      enable internal consistency checking\n" \
+"  -e<idx>      first defined variable index in extended resolution trace\n" \
+"  -E <proof>   generate extended clausal trace\n" \
+"  -b <proof>   generate compact binary resolution trace\n" \
+"  -B <proof>   generate extended binary resolution trace\n" \
+"  -r <proof>   generate compact binary resolution trace in RPT format\n" \
+"  -R <proof>   generate extended binary resolution proof in RES format\n" \
 "  -i <interpolant> <split> <strength>  generate Craig interpolant from hyper resolution proof\n" \
-"  -s <stats>        generate statistics\n" \
-"  -c <cnf>          specify original CNF for '-r' and '-R'\n" \
-"  -o <output>       set output file (for verbose and error output)\n" \
+"  -s <stats>   generate statistics\n" \
+"  -c <cnf>     specify original CNF for '-r' and '-R'\n" \
+"  -o <output>  set output file (for verbose and error output)\n" \
 "\n" \
 "Verbose level of 1 just prints statistics, while verbose level of two\n" \
 "and larger allows debugging of the input trace (and 'tracecheck').\n"
 
 /*------------------------------------------------------------------------*/
 
-  static const char *
+static const char *
 tracecheck_configuration (void)
 {
-  return
-    "VERSION=\"" BOOLEFORCE_VERSION "\"\n"
-    "OS=\"" BOOLEFORCE_OS "\"\n"
-    "ID=\"$Id: tracecheck.c,v 1.117 2010-09-03 08:29:23 biere Exp $\"\n"
-    "CC=\"" BOOLEFORCE_CC "\"\n"
-    "CCVERSION=\"" BOOLEFORCE_CCVERSION "\"\n"
-    "CFLAGS=\"" BOOLEFORCE_CFLAGS "\"\n"
+    return
+        "VERSION=\"" BOOLEFORCE_VERSION "\"\n"
+        "OS=\"" BOOLEFORCE_OS "\"\n"
+        "ID=\"$Id: tracecheck.c,v 1.117 2010-09-03 08:29:23 biere Exp $\"\n"
+        "CC=\"" BOOLEFORCE_CC "\"\n"
+        "CCVERSION=\"" BOOLEFORCE_CCVERSION "\"\n"
+        "CFLAGS=\"" BOOLEFORCE_CFLAGS "\"\n"
 #ifdef NDEBUG
-    "NDEBUG=1\n"
+        "NDEBUG=1\n"
 #else
-    "NDEBUG=0\n"
+        "NDEBUG=0\n"
 #endif
 #ifdef BOOLEFORCE_LOG
-    "LOG=1\n"
+        "LOG=1\n"
 #else
-    "LOG=0\n"
+        "LOG=0\n"
 #endif
-    ;
+        ;
 }
 
 /*------------------------------------------------------------------------*/
 
-  static int
+static int
 is_valid_number_str (const char * str)
 {
-  const char * p;
-  char ch;
+    const char * p;
+    char ch;
 
-  for (p = str; (ch = *p); p++)
-    if (!isdigit (ch))
-      return 0;
+    for (p = str; (ch = *p); p++)
+        if (!isdigit (ch))
+            return 0;
 
-  return 1;
+    return 1;
 }
 
 /*------------------------------------------------------------------------*/
 
-  int
+int
 tracecheck_main (int argc, char **argv)
 {
-  int res, done, i, print_only;
-  const char * arg;
-  double seconds;
-  FILE *file;
+    int res, done, i, print_only;
+    const char * arg;
+    double seconds;
+    FILE *file;
 
-  init ();
+    init ();
 
-  print_only = 0;
-  done = 0;
-  res = 0;
+    print_only = 0;
+    done = 0;
+    res = 0;
 
-  for (i = 1; !done && !res && i < argc; i++)
-  {
-    if (!strcmp (argv[i], "-h"))
-    {
-      fprintf (output, USAGE);
-      done = 1;
-    }
-    else if (!strcmp (argv[i], "--version"))
-    {
-      fprintf (output, "%s\n", BOOLEFORCE_VERSION);
-      done = 1;
-    }
-    else if (!strcmp (argv[i], "--id"))
-    {
-      /**INDENT-OFF**/
-      fprintf (output,
-          "$Id: tracecheck.c,v 1.117 2010-09-03 08:29:23 biere Exp $\n");
-      done = 1;
-      /**INDENT-ON**/
-    }
-    else if (!strcmp (argv[i], "--config"))
-    {
-      fprintf (output, "%s", tracecheck_configuration ());
-      done = 1;
-    }
-    else if (argv[i][0] == '-' && argv[i][1] == 'v')
-    {
-      if (argv[i][2])
-        verbose += atoi (argv[i] + 2);
-      else
-        verbose++;
-    }
-    else if (!strcmp (argv[i], "-i"))
-    {
-      if (++i == argc)
-        res = option_error ("argument to '-i' missing");
-      else if (interpolant)
-        res = option_error ("multiple '-i' options");
-      else
-      {
-        file = booleforce_open_file_for_writing (argv[i]);
-        if (file)
-          interpolant = file;
-        else
-          res = option_error ("can not write to '%s'", argv[i]);
+    for (i = 1; !done && !res && i < argc; i++) {
+        if (!strcmp (argv[i], "-h")) {
+            fprintf (output, USAGE);
+            done = 1;
+        } else if (!strcmp (argv[i], "--version")) {
+            fprintf (output, "%s\n", BOOLEFORCE_VERSION);
+            done = 1;
+        } else if (!strcmp (argv[i], "--id")) {
+            /**INDENT-OFF**/
+            fprintf (output,
+                     "$Id: tracecheck.c,v 1.117 2010-09-03 08:29:23 biere Exp $\n");
+            done = 1;
+            /**INDENT-ON**/
+        } else if (!strcmp (argv[i], "--config")) {
+            fprintf (output, "%s", tracecheck_configuration ());
+            done = 1;
+        } else if (argv[i][0] == '-' && argv[i][1] == 'v') {
+            if (argv[i][2])
+                verbose += atoi (argv[i] + 2);
+            else
+                verbose++;
+        } else if (!strcmp (argv[i], "-i")) {
+            if (++i == argc)
+                res = option_error ("argument to '-i' missing");
+            else if (interpolant)
+                res = option_error ("multiple '-i' options");
+            else {
+                file = booleforce_open_file_for_writing (argv[i]);
+                if (file)
+                    interpolant = file;
+                else
+                    res = option_error ("can not write to '%s'", argv[i]);
 
-        partition_split = atoi (argv[++i]);
-        if(partition_split < 0)
-          res = option_error ("invalid (A,B) split");
+                partition_split = atoi (argv[++i]);
+                if(partition_split < 0)
+                    res = option_error ("invalid (A,B) split");
 
-        itp_system_strength = atoi (argv[++i]);
-        if(itp_system_strength < 1 || itp_system_strength > 2)
-          res = option_error ("itp system strength must be 1 or 2");
-      }
-    }
-    else if (!strcmp (argv[i], "-s"))
-    {
-      if (++i == argc)
-        res = option_error ("argument to '-s' missing");
-      else if (stats_file)
-        res = option_error ("multiple '-s' options");
-      else
-      {
-        file = booleforce_open_file_for_writing (argv[i]);
-        if (file)
-          stats_file = file;
-        else
-          res = option_error ("can not write to '%s'", argv[i]);
-      }
-    }
-    else if (!strcmp (argv[i], "-b"))
-    {
-      if (++i == argc)
-        res = option_error ("argument to '-b' missing");
-      else if (bintrace)
-        res = option_error ("multiple '-b' options");
-      else
-      {
-        file = booleforce_open_file_for_writing (argv[i]);
-        if (file)
-          bintrace = file;
-        else
-          res = option_error ("can not write to '%s'", argv[i]);
-      }
-    }
-    else if (!strcmp (argv[i], "-B"))
-    {
-      if (++i == argc)
-        res = option_error ("argument to '-B' missing");
-      else if (ebintrace)
-        res = option_error ("multiple '-B' options");
-      else
-      {
-        file = booleforce_open_file_for_writing (argv[i]);
-        if (file)
-          ebintrace = file;
-        else
-          res = option_error ("can not write to '%s'", argv[i]);
-      }
-    }
-    else if (!strcmp (argv[i], "-r"))
-    {
-      if (++i == argc)
-        res = option_error ("argument to '-r' missing");
-      else if (rpttrace)
-        res = option_error ("multiple '-r' options");
-      else
-      {
-        file = booleforce_open_file_for_writing (argv[i]);
-        if (file)
-          rpttrace = file;
-        else
-          res = option_error ("can not write to '%s'", argv[i]);
-      }
-    }
-    else if (!strcmp (argv[i], "-R"))
-    {
-      if (++i == argc)
-        res = option_error ("argument to '-R' missing");
-      else if (restrace)
-        res = option_error ("multiple '-R' options");
-      else
-      {
-        file = booleforce_open_file_for_writing (argv[i]);
-        if (file)
-          restrace = file;
-        else
-          res = option_error ("can not write to '%s'", argv[i]);
-      }
-    }
-    else if (!strcmp (argv[i], "-c"))
-    {
-      if (++i == argc)
-        res = option_error ("argument to '-c' missing");
-      else if (original_cnf_file_name)
-        res = option_error ("multiple '-c' options");
-      else
-        original_cnf_file_name = argv[i];
-    }
-    else if (argv[i][0] == '-' && argv[i][1] == 'e')
-    {
-      arg = 0;
+                itp_system_strength = atoi (argv[++i]);
+                if(itp_system_strength < 1 || itp_system_strength > 2)
+                    res = option_error ("itp system strength must be 1 or 2");
+            }
+        } else if (!strcmp (argv[i], "-s")) {
+            if (++i == argc)
+                res = option_error ("argument to '-s' missing");
+            else if (stats_file)
+                res = option_error ("multiple '-s' options");
+            else {
+                file = booleforce_open_file_for_writing (argv[i]);
+                if (file)
+                    stats_file = file;
+                else
+                    res = option_error ("can not write to '%s'", argv[i]);
+            }
+        } else if (!strcmp (argv[i], "-E")) {
+            if (++i == argc)
+                res = option_error ("argument to '-E' missing");
+            else if (etrace)
+                res = option_error ("multiple '-E' options");
+            else {
+                file = booleforce_open_file_for_writing (argv[i]);
+                if (file)
+                    etrace = file;
+                else
+                    res = option_error ("can not write to '%s'", argv[i]);
+            }
+        } else if (!strcmp (argv[i], "-b")) {
+            if (++i == argc)
+                res = option_error ("argument to '-b' missing");
+            else if (bintrace)
+                res = option_error ("multiple '-b' options");
+            else {
+                file = booleforce_open_file_for_writing (argv[i]);
+                if (file)
+                    bintrace = file;
+                else
+                    res = option_error ("can not write to '%s'", argv[i]);
+            }
+        } else if (!strcmp (argv[i], "-B")) {
+            if (++i == argc)
+                res = option_error ("argument to '-B' missing");
+            else if (ebintrace)
+                res = option_error ("multiple '-B' options");
+            else {
+                file = booleforce_open_file_for_writing (argv[i]);
+                if (file)
+                    ebintrace = file;
+                else
+                    res = option_error ("can not write to '%s'", argv[i]);
+            }
+        } else if (!strcmp (argv[i], "-r")) {
+            if (++i == argc)
+                res = option_error ("argument to '-r' missing");
+            else if (rpttrace)
+                res = option_error ("multiple '-r' options");
+            else {
+                file = booleforce_open_file_for_writing (argv[i]);
+                if (file)
+                    rpttrace = file;
+                else
+                    res = option_error ("can not write to '%s'", argv[i]);
+            }
+        } else if (!strcmp (argv[i], "-R")) {
+            if (++i == argc)
+                res = option_error ("argument to '-R' missing");
+            else if (restrace)
+                res = option_error ("multiple '-R' options");
+            else {
+                file = booleforce_open_file_for_writing (argv[i]);
+                if (file)
+                    restrace = file;
+                else
+                    res = option_error ("can not write to '%s'", argv[i]);
+            }
+        } else if (!strcmp (argv[i], "-c")) {
+            if (++i == argc)
+                res = option_error ("argument to '-c' missing");
+            else if (original_cnf_file_name)
+                res = option_error ("multiple '-c' options");
+            else
+                original_cnf_file_name = argv[i];
+        } else if (argv[i][0] == '-' && argv[i][1] == 'e') {
+            arg = 0;
 
-      if (argv[i][2])
-        arg = argv[i] + 2;
-      else if (++i == argc)
-        res = option_error ("argument to '-e' missing");
-      else
-        arg = argv[i];
+            if (argv[i][2])
+                arg = argv[i] + 2;
+            else if (++i == argc)
+                res = option_error ("argument to '-e' missing");
+            else
+                arg = argv[i];
 
-      if (arg)
-      {
-        if (is_valid_number_str (arg))
-          first_defined_lit_idx = atoi (arg);
-        else
-          res = option_error (
-              "expected number as argument to '-e' but got '%s'", arg);
-      }
-    }
-    else if (!strcmp (argv[i], "-d"))
-    {
-      if (++i == argc)
-        res = option_error ("argument to '-d' missing");
-      else if (dotgraph)
-        res = option_error ("multiple '-d' options");
-      else
-      {
-        file = booleforce_open_file_for_writing (argv[i]);
-        if (file)
-          dotgraph = file;
-        else
-          res = option_error ("can not write to '%s'", argv[i]);
-      }
-    }
-    else if (!strcmp (argv[i], "--print"))
-      print_only = 1;
-    else if (!strcmp (argv[i], "--linear"))
-      assume_already_linearized = 1;
-    else if (!strcmp (argv[i], "--lax"))
-      lax = 1;
-    else if (!strcmp (argv[i], "--debug"))
-    {
+            if (arg) {
+                if (is_valid_number_str (arg))
+                    first_defined_lit_idx = atoi (arg);
+                else
+                    res = option_error (
+                              "expected number as argument to '-e' but got '%s'", arg);
+            }
+        } else if (!strcmp (argv[i], "-d")) {
+            if (++i == argc)
+                res = option_error ("argument to '-d' missing");
+            else if (dotgraph)
+                res = option_error ("multiple '-d' options");
+            else {
+                file = booleforce_open_file_for_writing (argv[i]);
+                if (file)
+                    dotgraph = file;
+                else
+                    res = option_error ("can not write to '%s'", argv[i]);
+            }
+        } else if (!strcmp (argv[i], "--print"))
+            print_only = 1;
+        else if (!strcmp (argv[i], "--linear"))
+            assume_already_linearized = 1;
+        else if (!strcmp (argv[i], "--lax"))
+            lax = 1;
+        else if (!strcmp (argv[i], "--debug")) {
 #ifndef NDEBUG
-      debug = 1;
+            debug = 1;
 #endif
-    }
-    else if (!strcmp (argv[i], "-o"))
-    {
-      if (++i <= argc)
-      {
-        if ((file = fopen (argv[i], "w")))
-        {
-          output = file;
-          close_output = 1;
+        } else if (!strcmp (argv[i], "-o")) {
+            if (++i <= argc) {
+                if ((file = fopen (argv[i], "w"))) {
+                    output = file;
+                    close_output = 1;
+                } else
+                    res = option_error ("can not write to '%s'", argv[i]);
+            } else
+                res = option_error ("argument to '-o' missing");
+        } else if (argv[i][0] == '-')
+            res = option_error ("invalid option '%s'", argv[i]);
+        else if (input)
+            res = option_error ("multiple input files");
+        else if (!(file = booleforce_open_file_for_reading (argv[i])))
+            res = option_error ("can not read '%s'", argv[i]);
+        else {
+            input = file;
+            input_name = argv[i];
+            close_input = 1;
         }
-        else
-          res = option_error ("can not write to '%s'", argv[i]);
-      }
-      else
-        res = option_error ("argument to '-o' missing");
     }
-    else if (argv[i][0] == '-')
-      res = option_error ("invalid option '%s'", argv[i]);
-    else if (input)
-      res = option_error ("multiple input files");
-    else if (!(file = booleforce_open_file_for_reading (argv[i])))
-      res = option_error ("can not read '%s'", argv[i]);
-    else
-    {
-      input = file;
-      input_name = argv[i];
-      close_input = 1;
+
+    if (!res && !done && !input) {
+        input = stdin;
+        input_name = "<stdin>";
+        assert (!close_input);
     }
-  }
 
-  if (!res && !done && !input)
-  {
-    input = stdin;
-    input_name = "<stdin>";
-    assert (!close_input);
-  }
-
-  if (!res && !done && !original_cnf_file_name)
-  {
-    if (rpttrace)
-      res = option_error ("option '-r' requires '-c'");
-    else if (restrace)
-      res = option_error ("option '-R' requires '-c'");
-  }
-
-  if (!res && !done && original_cnf_file_name)
-    res = !parse_header_of_original_dimacs_file ();
-
-  if (!res && !done)
-    init_buffer (buffer, input);
-
-  if (!res && !done)
-  {
-    if (parse ())
-    {
-      if (print_only)
-        print ();
-      else
-      {
-        if (check ())
-        {
-          if (interpolant)
-          {
-            output_aig = aiger_init ();
-            final_itp = clauses[empty_cls_idx]->itp;
-            expand (final_itp);
-            aiger_write_to_file (output_aig, aiger_binary_mode, interpolant);
-            aiger_reset (output_aig);
-            simpaig_dec (mgr, final_itp);
-          }
-
-          if (stats_file)
-            print_stats ();
-
-          if (dotgraph)
-            write_dotgraph_footer ();
-
-          fprintf (output,
-            "resolved %d root%s and %d empty clause%s\n",
-            count_roots,
-            count_roots == 1 ? "" : "s",
-            num_empty_clauses,
-            num_empty_clauses == 1 ? "" : "s");
-        }
-        else
-          res = 1;
-
-        // simpaig clean-up
-        if (literals)
-          release_literals ();
-        simpaig_reset (mgr);
-      }
+    if (!res && !done && !original_cnf_file_name) {
+        if (rpttrace)
+            res = option_error ("option '-r' requires '-c'");
+        else if (restrace)
+            res = option_error ("option '-R' requires '-c'");
     }
-    else
-      res = 1;
 
-    // Booleforce clean-up
-    release ();
-  }
+    if (!res && !done && original_cnf_file_name)
+        res = !parse_header_of_original_dimacs_file ();
 
-  seconds = booleforce_time_stamp () - entered_time;
-  seconds = (seconds < 0) ? 0 : seconds;
+    if (!res && !done)
+        init_buffer (buffer, input);
 
-  if (verbose)
-  {
-    LOG ("%d resolutions", num_resolutions);
-    LOG ("time spent %.2f seconds", seconds);
-    LOG ("memory usage %.1f MB",
-        booleforce_max_bytes () / (double) (1 << 20));
-  }
+    if (!res && !done) {
+        if (parse ()) {
+            if (print_only)
+                print (output);
+            else {
+                if (check ()) {
+                    if (interpolant) {
+                        output_aig = aiger_init ();
+                        final_itp = clauses[empty_cls_idx]->itp;
+                        expand (final_itp);
+                        aiger_write_to_file (output_aig, aiger_binary_mode, interpolant);
+                        aiger_reset (output_aig);
+                        simpaig_dec (mgr, final_itp);
+                    }
 
-  reset ();			/* no code between 'reset' and 'return' */
+                    if (stats_file)
+                        print_stats ();
 
-  return res;
+                    if (dotgraph)
+                        write_dotgraph_footer ();
+
+                    fprintf (output,
+                             "resolved %d root%s and %d empty clause%s\n",
+                             count_roots,
+                             count_roots == 1 ? "" : "s",
+                             num_empty_clauses,
+                             num_empty_clauses == 1 ? "" : "s");
+ 
+                    if (etrace)
+                        print (etrace);
+                } else
+                    res = 1;
+
+                // simpaig clean-up
+                if (literals)
+                    release_literals ();
+                simpaig_reset (mgr);
+            }
+        } else
+            res = 1;
+
+        // Booleforce clean-up
+        release ();
+    }
+
+    seconds = booleforce_time_stamp () - entered_time;
+    seconds = (seconds < 0) ? 0 : seconds;
+
+    if (verbose) {
+        LOG ("%d resolutions", num_resolutions);
+        LOG ("time spent %.2f seconds", seconds);
+        LOG ("memory usage %.1f MB",
+             booleforce_max_bytes () / (double) (1 << 20));
+    }
+
+    reset ();			/* no code between 'reset' and 'return' */
+
+    return res;
 }
+
