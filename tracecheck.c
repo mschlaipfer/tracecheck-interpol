@@ -44,14 +44,6 @@
 #include "simpaig.h"
 #include "aiger.h"
 
-
-#ifndef NDEBUG
-#define SANITY_AIG "/tmp/sanity.aig"
-#define SANITY_CNF "/tmp/sanity.cnf"
-#define AIGTOCNF_PATH "~/tools/aiger-1.9.4/aigtocnf"
-#define PICOSAT_PATH "~/tools/picosat-959/picosat"
-#endif
-
 /*------------------------------------------------------------------------*/
 
 #define VPFX "c "		/* verbose output prefix string */
@@ -213,7 +205,6 @@ static int previous_char;	/* implements ungetc */
 static FILE *output;
 static int close_output;
 static int verbose;		/* verbose level */
-static int itp_system_strength;
 
 /*------------------------------------------------------------------------*/
 
@@ -256,8 +247,6 @@ static Clause *first_in_order;
  */
 static Clause **clauses;
 static int size_clauses;
-static int max_cls_idx;
-static int empty_cls_idx;
 
 static int min_derived_idx;
 static int max_original_idx;
@@ -265,33 +254,19 @@ static int max_original_idx;
 static int num_original_clauses;
 static int num_original_literals;
 
-static int num_derived_init;
 static int num_derived_clauses;
 static int num_derived_literals;
 
-static int num_splits;
-static int num_merge_literals;
-static int num_merge_literals_after;
-
+/*------------------------------------------------------------------------*/
+/* Interpolation
+ */
+static int itp_system_strength;
 static int partition_split;
-
+static int empty_cls_idx; // get final itp at this index
 static simpaigmgr *mgr;
 static simpaig *final_itp;
 static simpaig **aigs;
 static aiger *output_aig;
-
-static int gates;
-static int ands;
-
-
-#ifndef NDEBUG
-static simpaig *partition_a;
-static simpaig *partition_b;
-#endif
-
-
-static char *outbuffer;
-static unsigned size_outbuffer;
 
 enum Label {
     UNDEF = -1,
@@ -301,6 +276,29 @@ enum Label {
     AB = 3,
 };
 
+#ifndef NDEBUG
+static simpaig *partition_a;
+static simpaig *partition_b;
+#endif
+
+#ifndef NDEBUG
+/* Stuff for checking invariant of interpolant */
+#define SANITY_AIG "/tmp/sanity.aig"
+#define SANITY_CNF "/tmp/sanity.cnf"
+static char* aigtocnf_path;
+static char* aigtocnf_call;
+static char* picosat_path;
+static char* picosat_call;
+#endif
+
+DeclareAIGComponentStorage (circuit_components_m);
+DeclareAIGComponentStorage (circuit_components_itp);
+
+/*------------------------------------------------------------------------*/
+
+static char *outbuffer;
+static unsigned size_outbuffer;
+
 /*------------------------------------------------------------------------*/
 
 DeclareIntStack (resolvent);
@@ -308,11 +306,6 @@ DeclareIntStack (stack);
 DeclareIntStack (roots);
 DeclareIntStack (trail);
 DeclareIntStack (labels);
-
-/*------------------------------------------------------------------------*/
-
-DeclareAIGComponentStorage (circuit_components_m);
-DeclareAIGComponentStorage (circuit_components_itp);
 
 /*------------------------------------------------------------------------*/
 
@@ -332,6 +325,14 @@ static int num_derived_clauses_before_split;
 static int num_antecedents_before_split;
 static int num_derived_clauses_after_split;
 static int num_antecedents_after;
+
+static int max_cls_idx; // helper to determine correctly the # of split clauses
+static int num_splits;
+static int num_merge_literals;
+static int num_merge_literals_after;
+
+static int gates;
+static int ands;
 
 /*------------------------------------------------------------------------*/
 
@@ -1737,6 +1738,7 @@ static int
 collect_literals (Clause * clause)
 {
     int idx, * p, * q, lit;
+    int i = 0;
     Clause * antecedent;
 
     // Note: Collect literals for all internal vertices, no matter if literal
@@ -1753,7 +1755,7 @@ collect_literals (Clause * clause)
         assert (antecedent);
         assert (antecedent->literals);
 
-        for (q = antecedent->literals; (lit = *q); q++) {
+        for (q = antecedent->literals, i = 0; (lit = *q); q++, i++) {
             short label = UNDEF;
             if (!antecedent->antecedents) {
                 // TODO visit always or just once?
@@ -1764,7 +1766,7 @@ collect_literals (Clause * clause)
                                                (literals[-lit].partition | literals[lit].partition | label);
 
             } else
-                label = antecedent->labels[q - antecedent->literals];
+                label = antecedent->labels[i];
 
 
             // Note: label for pivots doesn't matter at this point
@@ -1918,12 +1920,13 @@ pivot (Clause * clause, Clause * context)
 {
     int *p, idx, pos;
     int merge;
+    int i = 0;
 
-    for (p = clause->literals; (idx = *p); p++) {
+    for (p = clause->literals, i = 0; (idx = *p); p++, i++) {
         pos = literals[-idx].mark;
         if (pos > 0) {
             // Compute merge of literal labels for the pivot
-            merge = clause->labels[p - clause->literals] | literals[-idx].label;
+            merge = clause->labels[i] | literals[-idx].label;
             literals[-idx].label = merge;
             return idx;
         }
@@ -1983,8 +1986,9 @@ static void
 add_to_resolvent_except (Clause * clause, int idx)
 {
     int *p, other;
+    int i = 0;
 
-    for (p = clause->literals; (other = *p); p++) {
+    for (p = clause->literals, i = 0; (other = *p); p++, i++) {
         /* Skip resolved literal
          */
         if (other == idx)
@@ -1996,10 +2000,9 @@ add_to_resolvent_except (Clause * clause, int idx)
          */
         if (literals[other].mark) {
             assert (literals[other].label != UNDEF);
-            literals[other].label |= clause->labels[p - clause->literals];
+            literals[other].label |= clause->labels[i];
         } else
-            add_literal_to_resolvent (other, 
-              clause->labels[p - clause->literals]);
+            add_literal_to_resolvent (other, clause->labels[i]);
     }
 }
 
@@ -2162,7 +2165,6 @@ write_rpt_line (int count, int literal, int op1, int op2)
 static void
 write_dotgraph_header (void)
 {
-    // TODO sanitize input_name and use it
     fprintf (dotgraph, "digraph resproof {\n");
 }
 
@@ -2215,6 +2217,49 @@ check_prestine_chain (Clause * clause)
 
 /*------------------------------------------------------------------------*/
 #endif
+
+static void
+split (Clause **clause, int iterations, int lit)
+{
+  int i = 0;
+  int *tmp_res, *tmp_ants, new_idx;
+
+  num_splits++;
+  (*clause)->split = 1;
+
+  for (i = 0; i < count_resolvent; i++)
+      push_labels(literals[resolvent[i]].label);
+
+  // create intermediate clause
+  tmp_res = copy_ints(resolvent, count_resolvent);
+  tmp_ants = copy_stack();
+  new_idx = max_cls_idx + 1;
+  Clause *intermediate = add_clause(new_idx, tmp_res, tmp_ants, 0);
+  intermediate->labels = copy_labels();
+
+  // UPDATE
+  // remove antecedents (indices from 0 to (iterations-1))
+  // add new resolvent as antecedent at index (iterations-1)
+  // in order not to leak memory
+  // copy relevant memory region and free previously used memory
+  (*clause)->antecedents[iterations - 1] = new_idx;
+  int *tmp = copy_ints((*clause)->antecedents + (iterations - 1),
+                       length_ints((*clause)->antecedents) - (iterations - 1));
+  booleforce_delete_ints ((*clause)->antecedents);
+  (*clause)->antecedents = tmp;
+
+  intermediate->next_in_order = *clause;
+  if(*clause == first_in_order)
+      first_in_order = intermediate;
+#ifndef NDEBUG
+  (*clause)->resolved = 1;
+#endif
+  *clause = intermediate;
+  // Note: Reset not necessary because label is set from clause label anyhow
+  // before merge
+  literals[-lit].label = UNDEF;
+}
+
 /*------------------------------------------------------------------------*/
 /* This function assumes that the antecedents of a clauses can be resolved
  * with input resolution in increasing order to obtain the clause.  This
@@ -2309,47 +2354,13 @@ resolve_and_split (Clause ** clause)
         // literals[-lit].label is the merged label of the pivot literals
         if (pivot_label != UNDEF && pivot_label != literals[-lit].label) {
             // NEW SPLIT
-            // TODO refactor into new function
-            num_splits++;
-            (*clause)->split = 1;
-
-            for (i = 0; i < count_resolvent; i++)
-                push_labels(literals[resolvent[i]].label);
-
-            // create intermediate clause
-            int *tmp_res = copy_ints(resolvent, count_resolvent);
-            int *tmp_ants = copy_stack();
-            int new_idx = max_cls_idx + 1;
-            Clause *intermediate = add_clause(new_idx, tmp_res, tmp_ants, 0);
-            intermediate->labels = copy_labels();
-
-            // UPDATE
-            // remove antecedents (indices from 0 to (iterations-1))
-            // add new resolvent as antecedent at index (iterations-1)
-            // in order not to leak memory
-            // copy relevant memory region and free previously used memory
-            (*clause)->antecedents[iterations - 1] = new_idx;
-            int *tmp = copy_ints((*clause)->antecedents + (iterations - 1),
-                                 length_ints((*clause)->antecedents) - (iterations - 1));
-            booleforce_delete_ints ((*clause)->antecedents);
-            (*clause)->antecedents = tmp;
-
-            intermediate->next_in_order = *clause;
-            if(*clause == first_in_order)
-                first_in_order = intermediate;
-#ifndef NDEBUG
-            (*clause)->resolved = 1;
-#endif
-            *clause = intermediate;
-            // Note: Reset not necessary because label is set from clause label anyhow
-            // before merge
-            literals[-lit].label = UNDEF;
+            split (clause, iterations, lit);
             break;
         }
         // else
 
-        // Note: lagging one iteration behind so that antecedent causing split is
-        // not included
+        // Note: lagging one iteration behind so that antecedent causing split
+        // is not included
         push_stack(idx);
 
         pivot_label = literals[-lit].label;
@@ -2415,13 +2426,11 @@ resolve_and_split (Clause ** clause)
 
     count_resolvent = 0;
 
-    // Note: delete the stack if we haven't used it to copy the antecedents from
-    // it
-    // TODO: enough to free memory of stack or leaking here?
+    // reset the stack if we haven't used it to copy the antecedents from it
     count_stack = 0;
 
-    // Note: would jump over this otherwise anyhow
-    // if((*clause)->antecedents)
+    // Only for internal vertices ( if((*clause)->antecedents) )
+    // would jump over this otherwise due to the goto
     (*clause)->partition = pivot_label;
     assert ((*clause)->partition != UNDEF);
 
@@ -2495,14 +2504,13 @@ compute_m (Clause * clause)
     int *p, idx, len, input_count, iterations;
     simpaig **tmp, *ret_val;
 
+    // Note: len isn't the actual number of components
+    //       iterations after loops is
     len = length_ints (clause->literals);
     // TODO use realloc and maybe booleforce mem managment
     tmp = malloc(len * sizeof (circuit_components_m[0]));
     if(tmp != NULL) {
         circuit_components_m = tmp;
-        // TODO len isn't the actual number of components
-        //      iterations after loops is
-        //    count_circuit_components_m = len;
     }
 
     iterations = 0;
@@ -2601,6 +2609,7 @@ expand (simpaig * aig)
     free (aigs);
     simpaig_reset_indices (mgr);
     free (outbuffer);
+    outbuffer = NULL;
     size_outbuffer = 0;
 }
 
@@ -2673,9 +2682,8 @@ check_interpolation_invariant (simpaig *invariant)
     aiger_write_to_file (output_aig, aiger_binary_mode, file);
     booleforce_close_file (file);
     aiger_reset (output_aig);
-    // TODO paths / system()
-    system(AIGTOCNF_PATH " " SANITY_AIG " > " SANITY_CNF);
-    sat_result = system(PICOSAT_PATH " -n " SANITY_CNF " > /dev/null");
+    system (aigtocnf_call);
+    sat_result = system (picosat_call);
     // Note: return code 10 == sat, 20 == unsat
     if(sat_result >> 8 != 20)
         return 0;
@@ -2752,10 +2760,22 @@ compute_itp (Clause * clause)
     free(circuit_components_itp);
 
 #ifndef NDEBUG
-    // Note: remove to check invariant for all chains,
+    // Note: remove to check invariant for all chains
     if(clause->idx != empty_cls_idx)
         return 1;
 
+    int flag = 0;
+    if(aigtocnf_path[0] == '\0') {
+      printf("path to aigtocnf not set (set environment variable: AIGTOCNF)\n");
+      flag = 1;
+    }
+    if(picosat_path[0] == '\0') {
+      printf("path to picosat not set (set environment variable: PICOSAT)\n");
+      flag = 1;
+    }
+    if(flag)
+      return 1;
+    
     simpaig *sanity_tmp, *invariant;
 
     sanity_tmp = simpaig_and(mgr, partition_a, simpaig_not(clause->itp));
@@ -2775,7 +2795,6 @@ compute_itp (Clause * clause)
     printf("OKAY: partial interpolant @ clause %d\n", clause->idx);
 
 #endif
-
 
     return 1;
 }
@@ -2872,6 +2891,7 @@ inline static int
 visit (Clause * clause)
 {
     int *p, *q, false_literal_pos, idx0, idx1, tmp0, tmp1, idx, label, tmp;
+    int i = 0;
 
     p = clause->literals;
 
@@ -2902,12 +2922,12 @@ visit (Clause * clause)
     while ((idx = *q)) {
         tmp = deref (idx);
         if (tmp != FALSE) {
-            label = clause->labels[q - clause->literals];
+            label = clause->labels[i];
 
             *q = p[false_literal_pos];
             p[false_literal_pos] = idx;
 
-            clause->labels[q - clause->literals] = clause->labels[false_literal_pos];
+            clause->labels[i] = clause->labels[false_literal_pos];
             clause->labels[false_literal_pos] = label;
 
             CONS (literals[idx].clauses, clause);
@@ -2916,6 +2936,7 @@ visit (Clause * clause)
         }
 
         q++;
+        i++;
     }
 
     enqueue (p[!false_literal_pos], clause->idx);
@@ -3219,6 +3240,20 @@ check (void)
     partition_a = simpaig_true (mgr);
     partition_b = simpaig_true (mgr);
     forall_clauses (compute_partition_aigs, "partition aigs");
+
+    aigtocnf_path = getenv ("AIGTOCNF");
+    picosat_path = getenv ("PICOSAT");
+
+    int aigtocnf_len = strlen (aigtocnf_path) + strlen (SANITY_AIG) +
+                       strlen (SANITY_CNF) + strlen ("  > ") + 1;
+    aigtocnf_call = (char*) malloc (aigtocnf_len * sizeof(char));
+    sprintf (aigtocnf_call, "%s %s > %s",
+               aigtocnf_path, SANITY_AIG, SANITY_CNF);
+
+    int picosat_len = strlen (picosat_path) + strlen (SANITY_CNF) + 
+                      strlen (" -n  > /dev/null") + 1;
+    picosat_call = (char*) malloc (picosat_len * sizeof(char));
+    sprintf (picosat_call, "%s -n %s > /dev/null", picosat_path, SANITY_CNF);
 #endif
 
     if (interpolant) {
@@ -3226,13 +3261,16 @@ check (void)
             return 0;
     }
 
+#ifndef NDEBUG
+    free(aigtocnf_call);
+    free(picosat_call);
+#endif
+
     if (!forall_clauses (merge_literals_count, "merge_literals_count"))
         return 0;
 
     if (!forall_clauses (split_clauses_count, "split_clauses_count"))
         return 0;
-
-
 
     return 1;
 }
@@ -3268,7 +3306,7 @@ release_literals (void)
     int i;
 
     for (i = -max_lit_idx; i <= max_lit_idx; i++) {
-        // TODO simpaig_dec final_itp should take care of this
+        // TODO cleaning up the aigs doesn't work, LEAKING MEMORY
         //if (i > 0)
         //simpaig_dec (mgr, literals[i].aig); // dec variables
 
@@ -3764,7 +3802,7 @@ tracecheck_main (int argc, char **argv)
                              count_roots == 1 ? "" : "s",
                              num_empty_clauses,
                              num_empty_clauses == 1 ? "" : "s");
- 
+
                     if (etrace)
                         print (etrace);
                 } else
