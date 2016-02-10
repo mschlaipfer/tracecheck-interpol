@@ -1,3 +1,21 @@
+This is a Craig interpolation tool based on the TraceCheck proof checker.
+
+TraceCheck was written by Armin Biere and is now part of his BooleForce library
+(http://fmv.jku.at/booleforce/).
+
+This algorithm is joint work with Prof. Georg Weissenbacher. It is formalized
+and published in a special issue of the Journal of Automated Reasoning.
+
+The interpolants are generated using simpaig, which is part of the AIGER
+utilities (http://fmv.jku.at/aiger/).
+
+Matthias Schlaipfer, TU Wien, February 2016.
+http://forsyte.at/people/schlaipfer/
+
+===============================================================================
+The original README of BooleForce follows.
+===============================================================================
+
 This is the 'booleforce' SAT solver.
 
 To compile the solver, run './configure' first and then issue 'make'.  This

@@ -1,6 +1,6 @@
 .SUFFIXES: .states
 .c.states:
-	./states $*.c
+	CC=$(CC) ./states $*.c
 .c.o:
 	$(CC) $(CFLAGS) -c $*.c
 
@@ -15,14 +15,11 @@ all: booleforce tracecheck
 
 clean:
 	rm -f config.h Makefile
-	rm -f *.states
+	rm -f *-states-includes.h *.states
 	rm -f *.o *.a
 	rm -f booleforce tracecheck
-	rm -f log/*.log log/*.proof log/*.trace log/*.err log/*.core
 	rm -f *.bbg *.bb *.da *.gcov
 	rm -f gmon.out
-	rm -f cscope.out
-	rm -f *~
 
 booleforce: bfmain.o bfapp.o libbooleforce.a
 	$(CC) $(CFLAGS) -o $@ bfmain.o bfapp.o -L. -lbooleforce
@@ -45,9 +42,6 @@ bftime.o: config.h bftime.h bftime.c
 booleforce.states: booleforce.c config.h states
 booleforce.o: config.h bfmem.h bfstack.h bfsort.h \
   booleforce.h bftime.h bfio.h bfnum.h booleforce.states booleforce.c
-tcmain.o: Makefile
-test.o: config.h test.c
-testapi.o: booleforce.h testapi.c
 tracecheck.states: tracecheck.c config.h states
 tracecheck.o: config.h bftime.h bfio.h bfmem.h \
   tracecheck.states tracecheck.c
