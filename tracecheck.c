@@ -2923,6 +2923,7 @@ visit (Clause * clause)
     while ((idx = *q)) {
         tmp = deref (idx);
         if (tmp != FALSE) {
+            i = q - clause->literals;
             label = clause->labels[i];
 
             *q = p[false_literal_pos];
@@ -2937,7 +2938,6 @@ visit (Clause * clause)
         }
 
         q++;
-        i++;
     }
 
     enqueue (p[!false_literal_pos], clause->idx);
